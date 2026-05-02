@@ -48,30 +48,30 @@ class MyStr(str): ...
             Err('Input should be a valid UUID, invalid length: expected 36 characters, found 41'),
         ),
         (b'\x00\x00\x00\x000' * 4, Err('Input should be a valid UUID, invalid length: expected 16 bytes, found 20')),
-        ('550e8400-e29b-41d4-a716', Err('Input should be a valid UUID, invalid length: expected 32 characters, found 24')),
+        ('550e8400-e29b-41d4-a716', Err('Input should be a valid UUID, invalid length: expected 36 characters, found 24')),
         (
             'f47ac10b-58cc-4372-a567-0e02b2c3d47',
-            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 35'),
         ),
         (
             'de305d54-75b4-431b-adb2-eb6b9e54601',
-            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 35'),
         ),
         (
             '1b4e28ba-2fa1-11d2-883f-0016d3cca42',
-            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 35'),
         ),
         (
             '6ba7b810-9dad-11d1-80b4-00c04fd430c',
-            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 35'),
         ),
         (
             '886313e1-3b8a-5372-9b90-0c9aee199e5',
-            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 35'),
         ),
         (
             'c0a8f9a8-aa5e-482b-a067-9cb3a51f5c1',
-            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 35'),
         ),
         (0xA1A2A3A4B1B2C1C2D1D2D3D4D5D6D7D8, Err('UUID input should be a string, bytes or UUID object')),
         (00000000000000000000000000, Err('UUID input should be a string, bytes or UUID object')),
@@ -181,7 +181,7 @@ def test_uuid_version(input_value, version, expected):
         ('12345678123456781234567812345678', UUID('12345678-1234-5678-1234-567812345678')),
         (
             'c0a8f9a8-aa5e-482b-a067-9cb3a51f5c1',
-            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 35'),
         ),
         (1e1, Err('input should be a string, bytes or UUID object')),
         (None, Err('input should be a string, bytes or UUID object')),

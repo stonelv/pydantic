@@ -436,15 +436,6 @@ error_types! {
         character: {ctx_type: String, ctx_fn: field_from_context},
         index: {ctx_type: usize, ctx_fn: field_from_context},
     },
-    UuidInvalidGroupCount {
-        expected: {ctx_type: usize, ctx_fn: field_from_context},
-        actual: {ctx_type: usize, ctx_fn: field_from_context},
-    },
-    UuidInvalidGroupLength {
-        group: {ctx_type: usize, ctx_fn: field_from_context},
-        expected: {ctx_type: usize, ctx_fn: field_from_context},
-        actual: {ctx_type: usize, ctx_fn: field_from_context},
-    },
     UuidInvalidHyphenPosition {
         index: {ctx_type: usize, ctx_fn: field_from_context},
     },
@@ -620,8 +611,6 @@ impl ErrorType {
             Self::UuidInvalidLength { .. } => "Input should be a valid UUID, invalid length: expected {expected} characters, found {actual}",
             Self::UuidInvalidByteLength { .. } => "Input should be a valid UUID, invalid length: expected {expected} bytes, found {actual}",
             Self::UuidInvalidCharacter { .. } => "Input should be a valid UUID, invalid character: found `{character}` at {index}",
-            Self::UuidInvalidGroupCount { .. } => "Input should be a valid UUID, invalid group count: expected {expected}, found {actual}",
-            Self::UuidInvalidGroupLength { .. } => "Input should be a valid UUID, invalid group length in group {group}: expected {expected}, found {actual}",
             Self::UuidInvalidHyphenPosition { .. } => "Input should be a valid UUID, invalid hyphen position at index {index}",
             Self::DecimalType { .. } => "Decimal input should be an integer, float, string or Decimal object",
             Self::DecimalParsing { .. } => "Input should be a valid decimal",
@@ -784,8 +773,6 @@ impl ErrorType {
             Self::UuidInvalidLength { expected, actual, .. } => to_string_render!(tmpl, expected, actual),
             Self::UuidInvalidByteLength { expected, actual, .. } => to_string_render!(tmpl, expected, actual),
             Self::UuidInvalidCharacter { character, index, .. } => to_string_render!(tmpl, character, index),
-            Self::UuidInvalidGroupCount { expected, actual, .. } => to_string_render!(tmpl, expected, actual),
-            Self::UuidInvalidGroupLength { group, expected, actual, .. } => to_string_render!(tmpl, group, expected, actual),
             Self::UuidInvalidHyphenPosition { index, .. } => to_string_render!(tmpl, index),
             Self::DecimalMaxDigits { max_digits, .. } => {
                 let expected_plural = plural_s(*max_digits);

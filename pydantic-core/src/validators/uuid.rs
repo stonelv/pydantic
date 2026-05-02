@@ -167,6 +167,33 @@ fn is_hex_char(c: u8) -> bool {
     matches!(c, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
 }
 
+fn guess_expected_length(uuid_str: &str) -> usize {
+    let bytes = uuid_str.as_bytes();
+    let hyphen_count = bytes.iter().filter(|&&b| b == b'-').count();
+
+    if hyphen_count == 4 {
+        let actual_positions: Vec<usize> = bytes
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b == b'-')
+            .map(|(i, _)| i)
+            .collect();
+
+        for (actual, &standard) in actual_positions.iter().zip(HYPHEN_POSITIONS.iter()) {
+            if actual.abs_diff(standard) > 2 {
+                return UUID_SIMPLE_LEN;
+            }
+        }
+        return UUID_HYPHENATED_LEN;
+    }
+
+    if hyphen_count == 3 || hyphen_count == 5 {
+        return UUID_HYPHENATED_LEN;
+    }
+
+    UUID_SIMPLE_LEN
+}
+
 fn fast_check_uuid_str<'py>(
     uuid_str: &str,
     input: &(impl Input<'py> + ?Sized),
@@ -174,13 +201,10 @@ fn fast_check_uuid_str<'py>(
     let len = uuid_str.len();
 
     if len != UUID_HYPHENATED_LEN && len != UUID_SIMPLE_LEN {
+        let expected = guess_expected_length(uuid_str);
         return Err(ValError::new(
             ErrorType::UuidInvalidLength {
-                expected: if len > UUID_HYPHENATED_LEN {
-                    UUID_HYPHENATED_LEN
-                } else {
-                    UUID_SIMPLE_LEN
-                },
+                expected,
                 actual: len,
                 context: None,
             },

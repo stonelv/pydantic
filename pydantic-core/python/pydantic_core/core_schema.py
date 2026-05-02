@@ -4345,8 +4345,6 @@ ErrorType: TypeAlias = Literal[
     'uuid_invalid_length',
     'uuid_invalid_byte_length',
     'uuid_invalid_character',
-    'uuid_invalid_group_count',
-    'uuid_invalid_group_length',
     'uuid_invalid_hyphen_position',
     'decimal_type',
     'decimal_parsing',

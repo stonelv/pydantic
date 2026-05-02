@@ -244,6 +244,126 @@ print(m2.item_counts)
 #> [{}]
 ```
 
+### Empty string to default
+
+/// version-added | v2.14
+The `EmptyStrToDefault` annotation and `empty_str_to_default` field parameter allow you to specify that an empty string input should be treated as if the field was not provided, causing the default value to be used.
+
+This is useful when you want to accept empty strings from user input (e.g., HTML form inputs) but treat them as "no value provided" and use the field's default value instead.
+///
+
+You can use the `Annotated` pattern with `EmptyStrToDefault`:
+
+```python
+from typing import Annotated
+
+from pydantic import BaseModel, EmptyStrToDefault
+
+
+class User(BaseModel):
+    name: Annotated[str, EmptyStrToDefault()] = 'Anonymous'
+    age: Annotated[int, EmptyStrToDefault()] = 18
+
+
+# Empty string is treated as missing, so default is used
+user = User(name='', age='')
+print(user.name)
+#> Anonymous
+print(user.age)
+#> 18
+
+# Normal input is not affected
+user2 = User(name='John', age='25')
+print(user2.name)
+#> John
+print(user2.age)
+#> 25
+```
+
+Or use the `Field` function with `empty_str_to_default=True`:
+
+```python
+from pydantic import BaseModel, Field
+
+
+class User(BaseModel):
+    name: str = Field(default='Anonymous', empty_str_to_default=True)
+    age: int = Field(default=18, empty_str_to_default=True)
+
+
+user = User(name='', age='')
+print(user.name)
+#> Anonymous
+print(user.age)
+#> 18
+```
+
+#### Important notes
+
+- **`None` values are not affected**: If you pass `None` explicitly, it will be used as-is, not converted to the default value:
+
+```python
+from typing import Annotated
+
+from pydantic import BaseModel, EmptyStrToDefault
+
+
+class User(BaseModel):
+    name: Annotated[str | None, EmptyStrToDefault()] = 'Anonymous'
+
+
+# None is not affected
+user = User(name=None)
+print(user.name)
+#> None
+
+# Empty string uses default
+user2 = User(name='')
+print(user2.name)
+#> Anonymous
+```
+
+- **Supports `default_factory`**: `EmptyStrToDefault` works with `default_factory` as well:
+
+```python
+from typing import Annotated
+
+from pydantic import BaseModel, EmptyStrToDefault, Field
+
+
+class User(BaseModel):
+    tags: Annotated[list[str], EmptyStrToDefault()] = Field(default_factory=list)
+
+
+user = User(tags='')
+print(user.tags)
+#> []
+
+user2 = User(tags=['admin', 'user'])
+print(user2.tags)
+#> ['admin', 'user']
+```
+
+- **Strict mode behavior**: `EmptyStrToDefault` takes precedence over strict mode for the empty string case. If you declare `empty_str_to_default=True`, empty strings will use the default value regardless of strict mode:
+
+```python
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, EmptyStrToDefault
+
+
+class User(BaseModel):
+    model_config = ConfigDict(strict=True)
+    age: Annotated[int, EmptyStrToDefault()] = 18
+
+
+# In strict mode, '25' would normally fail for int,
+# but empty string uses default
+user = User(age='')
+print(user.age)
+#> 18
+```
+
 ## Field aliases
 
 !!! tip

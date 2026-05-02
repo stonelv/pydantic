@@ -6,6 +6,7 @@ import pytest
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     EmptyStrToDefault,
     Field,
     ValidationError,
@@ -60,6 +61,20 @@ class TestEmptyStrToDefault:
         m2 = Model(items=['a', 'b'])
         assert m2.items == ['a', 'b']
 
+    def test_default_factory_creates_new_instance(self) -> None:
+        """Test that default_factory creates a new instance each time."""
+
+        class Model(BaseModel):
+            items: Annotated[list[str], EmptyStrToDefault()] = Field(default_factory=list)
+
+        m1 = Model(items='')
+        m1.items.append('a')
+        assert m1.items == ['a']
+
+        m2 = Model(items='')
+        assert m2.items == []
+        assert m1.items is not m2.items
+
     def test_none_not_affected(self) -> None:
         """Test that None values are not affected."""
 
@@ -72,11 +87,11 @@ class TestEmptyStrToDefault:
         m2 = Model(name='')
         assert m2.name == 'default_name'
 
-    def test_strict_mode_not_affected(self) -> None:
-        """Test that strict mode behavior is not affected for non-string types."""
+    def test_strict_mode_int_field(self) -> None:
+        """Test that strict mode behavior works correctly for int field."""
 
         class Model(BaseModel):
-            model_config = {'strict': True}
+            model_config = ConfigDict(strict=True)
             count: Annotated[int, EmptyStrToDefault()] = 42
 
         m = Model(count='')
@@ -90,13 +105,21 @@ class TestEmptyStrToDefault:
         assert errors[0]['type'] == 'int_parsing'
         assert 'Input should be a valid integer' in errors[0]['msg']
 
-    def test_validate_default(self) -> None:
-        """Test with validate_default=True."""
+    def test_strict_mode_str_field(self) -> None:
+        """Test that strict mode behavior works correctly for str field."""
 
-        def validate_even(v: int) -> int:
-            if v % 2 != 0:
-                raise ValueError('Must be even')
-            return v
+        class Model(BaseModel):
+            model_config = ConfigDict(strict=True)
+            name: Annotated[str, EmptyStrToDefault()] = 'default_name'
+
+        m = Model(name='')
+        assert m.name == 'default_name'
+
+        m2 = Model(name='hello')
+        assert m2.name == 'hello'
+
+    def test_validate_default_with_valid_default(self) -> None:
+        """Test with validate_default=True when default is valid."""
 
         class Model(BaseModel):
             count: Annotated[int, EmptyStrToDefault()] = Field(
@@ -105,6 +128,21 @@ class TestEmptyStrToDefault:
 
         m = Model(count='')
         assert m.count == 42
+
+    def test_validate_default_with_invalid_default(self) -> None:
+        """Test with validate_default=True when default is invalid."""
+
+        class Model(BaseModel):
+            count: Annotated[int, EmptyStrToDefault()] = Field(
+                default='not_an_int', validate_default=True
+            )
+
+        with pytest.raises(ValidationError) as exc_info:
+            Model()
+
+        errors = exc_info.value.errors(include_url=False)
+        assert len(errors) == 1
+        assert errors[0]['type'] == 'int_parsing'
 
     def test_without_default_raises(self) -> None:
         """Test that field without default still raises for missing value."""
@@ -198,3 +236,97 @@ class TestEmptyStrToDefault:
 
         m2 = Model(items=['a', 'b'])
         assert m2.items == ['a', 'b']
+
+    def test_default_factory_with_data_field_order(self) -> None:
+        """Test default_factory with data respects field ordering."""
+
+        def create_greeting(data: dict) -> str:
+            return f"Hello, {data.get('name', 'stranger')}!"
+
+        class Model(BaseModel):
+            name: str = 'World'
+            greeting: Annotated[str, EmptyStrToDefault()] = Field(
+                default_factory=create_greeting,
+                default_factory_takes_data=True,
+            )
+
+        m = Model(greeting='')
+        assert m.greeting == 'Hello, World!'
+
+        m2 = Model(name='Alice', greeting='')
+        assert m2.greeting == 'Hello, Alice!'
+
+    def test_float_field(self) -> None:
+        """Test EmptyStrToDefault with float field."""
+
+        class Model(BaseModel):
+            price: Annotated[float, EmptyStrToDefault()] = 99.99
+
+        m = Model(price='')
+        assert m.price == 99.99
+
+        m2 = Model(price='19.99')
+        assert m2.price == 19.99
+
+    def test_bool_field(self) -> None:
+        """Test EmptyStrToDefault with bool field."""
+
+        class Model(BaseModel):
+            active: Annotated[bool, EmptyStrToDefault()] = True
+
+        m = Model(active='')
+        assert m.active is True
+
+    def test_optional_int_with_default(self) -> None:
+        """Test EmptyStrToDefault with Optional[int] that has a default."""
+
+        class Model(BaseModel):
+            count: Annotated[int | None, EmptyStrToDefault()] = 0
+
+        m = Model(count='')
+        assert m.count == 0
+
+        m2 = Model(count=None)
+        assert m2.count is None
+
+        m3 = Model(count='42')
+        assert m3.count == 42
+
+    def test_partial_empty_strings(self) -> None:
+        """Test that only empty strings are converted, not all strings."""
+
+        class Model(BaseModel):
+            a: Annotated[str, EmptyStrToDefault()] = 'default_a'
+            b: Annotated[str, EmptyStrToDefault()] = 'default_b'
+
+        m = Model(a='', b='hello')
+        assert m.a == 'default_a'
+        assert m.b == 'hello'
+
+    def test_lax_mode_int_field(self) -> None:
+        """Test EmptyStrToDefault with int field in lax mode."""
+
+        class Model(BaseModel):
+            model_config = ConfigDict(strict=False)
+            count: Annotated[int, EmptyStrToDefault()] = 42
+
+        m = Model(count='')
+        assert m.count == 42
+
+        m2 = Model(count='100')
+        assert m2.count == 100
+
+    def test_validate_default_error_on_empty_string(self) -> None:
+        """Test that validate_default error is raised when empty string triggers invalid default."""
+
+        class Model(BaseModel):
+            count: Annotated[int, EmptyStrToDefault()] = Field(
+                default='not_an_int', validate_default=True
+            )
+
+        with pytest.raises(ValidationError) as exc_info:
+            Model(count='')
+
+        errors = exc_info.value.errors(include_url=False)
+        assert len(errors) == 1
+        assert errors[0]['type'] == 'int_parsing'

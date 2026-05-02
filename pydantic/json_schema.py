@@ -2634,10 +2634,6 @@ _HashableJsonValue: TypeAlias = (
 
 _UNORDERED_LIST_KEYS = frozenset({
     'required',
-    'enum',
-    'examples',
-    'dependentRequired',
-    'type',
 })
 
 

@@ -41,37 +41,37 @@ class MyStr(str): ...
         ('not-a-valid-uuid', Err('Input should be a valid UUID, invalid character: found `n` at 1')),
         (
             '12345678-1234-5678-1234-5678123456789',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 13'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 37'),
         ),
         (
             '12345678-1234-1234-1234-1234567890123',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 13'),
+            Err('Input should be a valid UUID, invalid length: expected 36 characters, found 41'),
         ),
         (b'\x00\x00\x00\x000' * 4, Err('Input should be a valid UUID, invalid length: expected 16 bytes, found 20')),
-        ('550e8400-e29b-41d4-a716', Err('Input should be a valid UUID, invalid group count: expected 5, found 4')),
+        ('550e8400-e29b-41d4-a716', Err('Input should be a valid UUID, invalid length: expected 32 characters, found 24')),
         (
             'f47ac10b-58cc-4372-a567-0e02b2c3d47',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 11'),
+            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
         ),
         (
             'de305d54-75b4-431b-adb2-eb6b9e54601',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 11'),
+            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
         ),
         (
             '1b4e28ba-2fa1-11d2-883f-0016d3cca42',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 11'),
+            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
         ),
         (
             '6ba7b810-9dad-11d1-80b4-00c04fd430c',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 11'),
+            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
         ),
         (
             '886313e1-3b8a-5372-9b90-0c9aee199e5',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 11'),
+            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
         ),
         (
             'c0a8f9a8-aa5e-482b-a067-9cb3a51f5c1',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 11'),
+            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
         ),
         (0xA1A2A3A4B1B2C1C2D1D2D3D4D5D6D7D8, Err('UUID input should be a string, bytes or UUID object')),
         (00000000000000000000000000, Err('UUID input should be a string, bytes or UUID object')),
@@ -181,7 +181,7 @@ def test_uuid_version(input_value, version, expected):
         ('12345678123456781234567812345678', UUID('12345678-1234-5678-1234-567812345678')),
         (
             'c0a8f9a8-aa5e-482b-a067-9cb3a51f5c1',
-            Err('Input should be a valid UUID, invalid group length in group 4: expected 12, found 11'),
+            Err('Input should be a valid UUID, invalid length: expected 32 characters, found 35'),
         ),
         (1e1, Err('input should be a string, bytes or UUID object')),
         (None, Err('input should be a string, bytes or UUID object')),
@@ -233,3 +233,81 @@ def test_uuid_wrap_json():
 def uuid_safety_unknown():
     output = SchemaValidator(core_schema.uuid_schema()).validate_python('a6cc5730-2261-11ee-9c43-2eb5a363657c')
     assert output.is_safe is SafeUUID.unknown
+
+
+class TestUuidFineGrainedErrors:
+    """Tests for the new fine-grained UUID error types with fast fail path."""
+
+    def test_uuid_invalid_character(self):
+        """Test that invalid characters are caught with specific error type."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        with pytest.raises(ValidationError) as exc_info:
+            v.validate_python('not-a-valid-uuid')
+        error = exc_info.value.errors()[0]
+        assert error['type'] == 'uuid_invalid_character'
+        assert error['ctx'] == {'character': 'n', 'index': 1}
+        assert 'invalid character' in error['msg']
+
+    def test_uuid_invalid_character_middle(self):
+        """Test invalid character in the middle of UUID."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        with pytest.raises(ValidationError) as exc_info:
+            v.validate_python('12345678-1234-5678-1234-56781234567g')
+        error = exc_info.value.errors()[0]
+        assert error['type'] == 'uuid_invalid_character'
+        assert error['ctx'] == {'character': 'g', 'index': 36}
+
+    def test_uuid_invalid_hyphen_position(self):
+        """Test invalid hyphen position."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        with pytest.raises(ValidationError) as exc_info:
+            v.validate_python('12345678_1234-5678-1234-567812345678')
+        error = exc_info.value.errors()[0]
+        assert error['type'] == 'uuid_invalid_hyphen_position'
+        assert error['ctx'] == {'index': 9}
+
+    def test_uuid_invalid_length_too_short(self):
+        """Test UUID that is too short."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        with pytest.raises(ValidationError) as exc_info:
+            v.validate_python('550e8400-e29b-41d4-a716')
+        error = exc_info.value.errors()[0]
+        assert error['type'] == 'uuid_invalid_length'
+        assert error['ctx']['actual'] == 24
+
+    def test_uuid_invalid_length_too_long(self):
+        """Test UUID that is too long."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        with pytest.raises(ValidationError) as exc_info:
+            v.validate_python('12345678-1234-5678-1234-5678123456789')
+        error = exc_info.value.errors()[0]
+        assert error['type'] == 'uuid_invalid_length'
+        assert error['ctx']['actual'] == 37
+
+    def test_uuid_invalid_byte_length(self):
+        """Test bytes with invalid length."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        with pytest.raises(ValidationError) as exc_info:
+            v.validate_python(b'\x00\x00\x00\x000' * 4)
+        error = exc_info.value.errors()[0]
+        assert error['type'] == 'uuid_invalid_byte_length'
+        assert error['ctx']['actual'] == 20
+        assert error['ctx']['expected'] == 16
+
+    def test_valid_uuid_simple_format(self):
+        """Test that valid UUID in simple format (without hyphens) still works."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        result = v.validate_python('12345678123456781234567812345678')
+        assert result == UUID('12345678-1234-5678-1234-567812345678')
+
+    def test_valid_uuid_hyphenated_format(self):
+        """Test that valid UUID in hyphenated format still works."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        result = v.validate_python('550e8400-e29b-41d4-a716-446655440000')
+        assert result == UUID('550e8400-e29b-41d4-a716-446655440000')
+
+    def test_valid_uuid_bytes(self):
+        """Test that valid UUID as bytes still works."""
+        v = SchemaValidator(core_schema.uuid_schema())
+        result = v.validate_python(b'\x12\x34\x56\x78' * 4)
+        assert result == UUID('12345678-1234-5678-1234-567812345678')

@@ -158,20 +158,23 @@ class _DefinitionsRemapping:
         for _iter in range(100):  # prevent an infinite loop in the case of a bug, 100 iterations should be enough
             # For every possible remapped DefsRef, collect all schemas that DefsRef might be used for:
             schemas_for_alternatives: dict[DefsRef, list[JsonSchemaValue]] = defaultdict(list)
-            for defs_ref in copied_definitions:
+            # Use sorted keys for stable iteration order
+            for defs_ref in sorted(copied_definitions):
                 alternatives = prioritized_choices[defs_ref]
                 for alternative in alternatives:
                     schemas_for_alternatives[alternative].append(copied_definitions[defs_ref])
 
             # Deduplicate the schemas for each alternative; the idea is that we only want to remap to a new DefsRef
             # if it introduces no ambiguity, i.e., there is only one distinct schema for that DefsRef.
-            for defs_ref in schemas_for_alternatives:
+            # Use sorted keys for stable iteration order
+            for defs_ref in sorted(schemas_for_alternatives):
                 schemas_for_alternatives[defs_ref] = _deduplicate_schemas(schemas_for_alternatives[defs_ref])
 
             # Build the remapping
             defs_remapping: dict[DefsRef, DefsRef] = {}
             json_remapping: dict[JsonRef, JsonRef] = {}
-            for original_defs_ref in definitions:
+            # Use sorted keys for stable iteration order
+            for original_defs_ref in sorted(definitions):
                 alternatives = prioritized_choices[original_defs_ref]
                 # Pick the first alternative that has only one schema, since that means there is no collision
                 remapped_defs_ref = next(x for x in alternatives if len(schemas_for_alternatives[x]) == 1)
@@ -2629,8 +2632,17 @@ _HashableJsonValue: TypeAlias = (
 )
 
 
+_UNORDERED_LIST_KEYS = frozenset({
+    'required',
+    'enum',
+    'examples',
+    'dependentRequired',
+    'type',
+})
+
+
 def _deduplicate_schemas(schemas: Iterable[JsonDict]) -> list[JsonDict]:
-    return list({_make_json_hashable(schema): schema for schema in schemas}.values())
+    return list({_make_json_hashable_stable(schema): schema for schema in schemas}.values())
 
 
 def _make_json_hashable(value: JsonValue) -> _HashableJsonValue:
@@ -2638,6 +2650,20 @@ def _make_json_hashable(value: JsonValue) -> _HashableJsonValue:
         return tuple(sorted((k, _make_json_hashable(v)) for k, v in value.items()))
     elif isinstance(value, list):
         return tuple(_make_json_hashable(v) for v in value)
+    else:
+        return value
+
+
+def _make_json_hashable_stable(value: JsonValue, parent_key: str | None = None) -> _HashableJsonValue:
+    if isinstance(value, dict):
+        return tuple(
+            sorted((k, _make_json_hashable_stable(v, k)) for k, v in value.items())
+        )
+    elif isinstance(value, list):
+        items = tuple(_make_json_hashable_stable(v, parent_key) for v in value)
+        if parent_key in _UNORDERED_LIST_KEYS:
+            return tuple(sorted(items))
+        return items
     else:
         return value
 

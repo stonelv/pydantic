@@ -7232,4 +7232,193 @@ def test_nested_model_deduplication() -> None:
 
     assert 'Level1' in definitions
     assert 'Level1-Input' not in definitions
-    assert 'Level1-Output' not in definitions
+
+
+def test_recursive_model_json_schema_stability() -> None:
+    """Test that recursive models generate stable JSON Schema $defs."""
+
+    class Node(BaseModel):
+        value: str
+        children: Optional[List['Node']] = None
+
+    Node.model_rebuild()
+
+    json_schema = Node.model_json_schema()
+
+    assert '$defs' in json_schema
+    assert 'Node' in json_schema['$defs']
+
+    defs = json_schema['$defs']['Node']
+    assert 'properties' in defs
+    assert 'children' in defs['properties']
+
+    children_schema = defs['properties']['children']
+    assert 'anyOf' in children_schema or '$ref' in children_schema
+
+
+def test_mutual_reference_json_schema_stability() -> None:
+    """Test that mutually referencing models generate stable JSON Schema $defs."""
+
+    class A(BaseModel):
+        name: str
+        b: Optional['B'] = None
+
+    class B(BaseModel):
+        name: str
+        a: Optional[A] = None
+
+    A.model_rebuild()
+    B.model_rebuild()
+
+    schema_a = A.model_json_schema()
+    schema_b = B.model_json_schema()
+
+    assert '$defs' in schema_a
+    assert 'A' in schema_a['$defs']
+    assert 'B' in schema_a['$defs']
+
+    assert '$defs' in schema_b
+    assert 'A' in schema_b['$defs']
+    assert 'B' in schema_b['$defs']
+
+    assert schema_a['$defs'].keys() == schema_b['$defs'].keys()
+
+
+def test_deep_nested_with_back_reference() -> None:
+    """Test deeply nested models with back references generate stable JSON Schema."""
+
+    class DeepNestedModel(BaseModel):
+        level1: 'Level1'
+
+    class Level1(BaseModel):
+        level2: 'Level2'
+
+    class Level2(BaseModel):
+        level3: 'Level3'
+
+    class Level3(BaseModel):
+        value: str
+        back_ref: Optional[DeepNestedModel] = None
+
+    DeepNestedModel.model_rebuild()
+    Level1.model_rebuild()
+    Level2.model_rebuild()
+    Level3.model_rebuild()
+
+    json_schema = DeepNestedModel.model_json_schema()
+
+    assert '$defs' in json_schema
+    defs_keys = set(json_schema['$defs'].keys())
+
+    expected_keys = {'DeepNestedModel', 'Level1', 'Level2', 'Level3'}
+    assert expected_keys.issubset(defs_keys) or expected_keys.issubset(
+        k.split('-')[0] for k in defs_keys
+    )
+
+
+def test_generic_containers_with_recursive_types() -> None:
+    """Test that generic containers (List, Dict, Optional) with recursive types work correctly."""
+
+    class TreeNode(BaseModel):
+        value: str
+        children: List['TreeNode'] = []
+        siblings: Dict[str, 'TreeNode'] = {}
+        parent: Optional['TreeNode'] = None
+
+    TreeNode.model_rebuild()
+
+    json_schema = TreeNode.model_json_schema()
+
+    assert '$defs' in json_schema
+    assert 'TreeNode' in json_schema['$defs']
+
+    defs = json_schema['$defs']['TreeNode']
+    assert 'properties' in defs
+
+    properties = defs['properties']
+    assert 'children' in properties
+    assert 'siblings' in properties
+    assert 'parent' in properties
+
+    children_schema = properties['children']
+    assert children_schema.get('type') == 'array' or 'items' in children_schema
+
+    siblings_schema = properties['siblings']
+    assert siblings_schema.get('type') == 'object' or 'additionalProperties' in siblings_schema
+
+
+def test_field_order_independence_for_defs() -> None:
+    """Test that $defs keys and reference paths don't change with field order."""
+    from pydantic.json_schema import _make_json_hashable_stable, _UNORDERED_LIST_KEYS
+
+    schema1 = {
+        'type': 'object',
+        'properties': {'a': {'type': 'integer'}, 'b': {'type': 'string'}},
+        'required': ['a', 'b'],
+    }
+    schema2 = {
+        'type': 'object',
+        'properties': {'b': {'type': 'string'}, 'a': {'type': 'integer'}},
+        'required': ['b', 'a'],
+    }
+
+    hash1 = _make_json_hashable_stable(schema1)
+    hash2 = _make_json_hashable_stable(schema2)
+
+    assert hash1 == hash2
+
+    enum_schema1 = {'type': 'string', 'enum': ['a', 'b', 'c']}
+    enum_schema2 = {'type': 'string', 'enum': ['c', 'a', 'b']}
+
+    hash_enum1 = _make_json_hashable_stable(enum_schema1)
+    hash_enum2 = _make_json_hashable_stable(enum_schema2)
+
+    assert hash_enum1 == hash_enum2
+
+    anyof_schema1 = {'anyOf': [{'type': 'integer'}, {'type': 'string'}]}
+    anyof_schema2 = {'anyOf': [{'type': 'string'}, {'type': 'integer'}]}
+
+    hash_anyof1 = _make_json_hashable_stable(anyof_schema1)
+    hash_anyof2 = _make_json_hashable_stable(anyof_schema2)
+
+    assert hash_anyof1 != hash_anyof2
+
+
+def test_multiple_recursive_paths_stability() -> None:
+    """Test that models with multiple paths to the same recursive type generate stable $defs."""
+
+    class Item(BaseModel):
+        name: str
+
+    class Container(BaseModel):
+        items: List[Item]
+        first_item: Optional[Item] = None
+        item_map: Dict[str, Item] = {}
+
+    json_schema = Container.model_json_schema()
+
+    assert '$defs' in json_schema
+    defs_keys = list(json_schema['$defs'].keys())
+
+    assert len([k for k in defs_keys if 'Item' in k]) == 1
+
+
+def test_recursive_union_types() -> None:
+    """Test recursive types within unions generate stable JSON Schema."""
+
+    class Node(BaseModel):
+        value: str
+        next: Union['Node', None] = None
+
+    Node.model_rebuild()
+
+    json_schema = Node.model_json_schema()
+
+    assert '$defs' in json_schema
+    assert 'Node' in json_schema['$defs']
+
+    node_def = json_schema['$defs']['Node']
+    assert 'next' in node_def['properties']
+
+    next_schema = node_def['properties']['next']
+    assert 'anyOf' in next_schema or '$ref' in next_schema

@@ -111,6 +111,7 @@ __all__ = (
     'JsonValue',
     'OnErrorOmit',
     'FailFast',
+    'EmptyStrToDefault',
 )
 
 
@@ -3297,3 +3298,39 @@ class FailFast(_fields.PydanticMetadata, BaseMetadata):
     """
 
     fail_fast: bool = True
+
+
+@_dataclasses.dataclass
+class EmptyStrToDefault(BaseMetadata):
+    """An `EmptyStrToDefault` annotation can be used to specify that an empty string input
+    should be treated as if the field was not provided, causing the default value to be used.
+
+    This is useful when you want to accept empty strings from user input but treat them as
+    "no value provided" and use the field's default value instead.
+
+    Note:
+        - This does not affect `None` values.
+        - This does not affect strict mode behavior for non-string types.
+        - The field must have a default value or default_factory for this to work.
+
+    Example:
+        ```python
+        from typing import Annotated
+
+        from pydantic import BaseModel, EmptyStrToDefault, Field
+
+        class Model(BaseModel):
+            name: Annotated[str, EmptyStrToDefault()] = 'default_name'
+            count: Annotated[int, EmptyStrToDefault()] = 42
+
+        # Empty string is treated as missing, so default is used
+        m = Model(name='', count='')
+        print(m.name)  #> 'default_name'
+        print(m.count)  #> 42
+
+        # None is not affected
+        m2 = Model(name=None)  # This will raise a validation error for str type
+        ```
+    """
+
+    empty_str_to_default: bool = True

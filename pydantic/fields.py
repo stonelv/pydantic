@@ -88,6 +88,7 @@ class _FromFieldInfoInputs(TypedDict, total=False):
     kw_only: bool | None
     coerce_numbers_to_str: bool | None
     fail_fast: bool | None
+    empty_str_to_default: bool | None
 
 
 class _FieldInfoInputs(_FromFieldInfoInputs, total=False):
@@ -224,6 +225,7 @@ class FieldInfo(_repr.Representation):
         'union_mode': None,
         'coerce_numbers_to_str': None,
         'fail_fast': types.FailFast,
+        'empty_str_to_default': types.EmptyStrToDefault,
     }
 
     def __init__(self, **kwargs: Unpack[_FieldInfoInputs]) -> None:
@@ -914,6 +916,7 @@ _DefaultValues = {
     'min_length': None,
     'max_length': None,
     'coerce_numbers_to_str': None,
+    'empty_str_to_default': None,
 }
 
 

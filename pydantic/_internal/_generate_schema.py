@@ -2654,19 +2654,50 @@ def wrap_default(field_info: FieldInfo, schema: core_schema.CoreSchema) -> core_
     Returns:
         Updated schema by default value or `default_factory`.
     """
+    from ..types import EmptyStrToDefault
+
+    has_empty_str_to_default = any(
+        isinstance(m, EmptyStrToDefault) and m.empty_str_to_default
+        for m in field_info.metadata
+    )
+
     if field_info.default_factory:
-        return core_schema.with_default_schema(
+        default_schema = core_schema.with_default_schema(
             schema,
             default_factory=field_info.default_factory,
             default_factory_takes_data=takes_validated_data_argument(field_info.default_factory),
             validate_default=field_info.validate_default,
         )
     elif field_info.default is not PydanticUndefined:
-        return core_schema.with_default_schema(
+        default_schema = core_schema.with_default_schema(
             schema, default=field_info.default, validate_default=field_info.validate_default
         )
     else:
         return schema
+
+    if has_empty_str_to_default:
+        def _empty_str_to_default_validator(
+            value: Any, handler: core_schema.ValidatorFunctionWrapHandler
+        ) -> Any:
+            if value == '':
+                if field_info.default_factory:
+                    if takes_validated_data_argument(field_info.default_factory):
+                        default_value = field_info.default_factory({})
+                    else:
+                        default_value = field_info.default_factory()
+                else:
+                    default_value = field_info.default
+
+                if field_info.validate_default:
+                    return handler(default_value)
+                return default_value
+            return handler(value)
+
+        return core_schema.no_info_wrap_validator_function(
+            _empty_str_to_default_validator, default_schema
+        )
+
+    return default_schema
 
 
 def _extract_get_pydantic_json_schema(tp: Any) -> GetJsonSchemaFunction | None:

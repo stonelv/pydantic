@@ -300,6 +300,47 @@ print(user.age)
 
 #### Important notes
 
+- **Only works with default values**: `EmptyStrToDefault` only takes effect when the field has a `default` or `default_factory`. Without a default value, empty strings are validated normally:
+
+```python
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, EmptyStrToDefault, Field, ValidationError
+
+
+# With default: empty string uses default
+class UserWithDefault(BaseModel):
+    name: Annotated[str, EmptyStrToDefault()] = 'Anonymous'
+
+
+user1 = UserWithDefault(name='')
+print(user1.name)
+#> Anonymous
+
+
+# Without default: empty string is validated normally
+class UserWithoutDefault(BaseModel):
+    model_config = ConfigDict(strict=True)
+    age: Annotated[int, EmptyStrToDefault()]
+
+
+# In strict mode without default, '' raises type error
+try:
+    UserWithoutDefault(age='')
+except ValidationError as e:
+    print(e.errors(include_url=False))
+    """
+    [
+        {
+            'type': 'int_type',
+            'loc': ('age',),
+            'msg': 'Input should be a valid integer',
+            'input': '',
+        }
+    ]
+    """
+```
+
 - **`None` values are not affected**: If you pass `None` explicitly, it will be used as-is, not converted to the default value:
 
 ```python
@@ -386,8 +427,6 @@ Here is an example of using the `alias` parameter:
 ```python
 from pydantic import BaseModel, Field
 
-
-class User(BaseModel):
     name: str = Field(alias='username')
 
 

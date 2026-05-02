@@ -144,15 +144,6 @@ class TestEmptyStrToDefault:
         assert len(errors) == 1
         assert errors[0]['type'] == 'int_parsing'
 
-    def test_without_default_raises(self) -> None:
-        """Test that field without default still raises for missing value."""
-
-        class Model(BaseModel):
-            name: Annotated[str, EmptyStrToDefault()]
-
-        m = Model(name='')
-        assert m.name == ''
-
     def test_empty_str_to_default_false(self) -> None:
         """Test that EmptyStrToDefault(False) does not convert empty string."""
 
@@ -330,3 +321,62 @@ class TestEmptyStrToDefault:
         errors = exc_info.value.errors(include_url=False)
         assert len(errors) == 1
         assert errors[0]['type'] == 'int_parsing'
+
+
+class TestEmptyStrToDefaultWithoutDefault:
+    """Tests for EmptyStrToDefault when field has no default value."""
+
+    def test_str_field_no_default_empty_string_kept(self) -> None:
+        """Test that str field without default keeps '' as-is (empty_str_to_default only works with default)."""
+
+        class Model(BaseModel):
+            name: Annotated[str, EmptyStrToDefault()]
+
+        m = Model(name='')
+        assert m.name == ''
+
+    def test_str_field_no_default_normal_value(self) -> None:
+        """Test that str field without default works normally."""
+
+        class Model(BaseModel):
+            name: Annotated[str, EmptyStrToDefault()]
+
+        m = Model(name='hello')
+        assert m.name == 'hello'
+
+    def test_str_field_no_default_missing_raises(self) -> None:
+        """Test that missing value still raises required error."""
+
+        class Model(BaseModel):
+            name: Annotated[str, EmptyStrToDefault()]
+
+        with pytest.raises(ValidationError) as exc_info:
+            Model()
+
+        errors = exc_info.value.errors(include_url=False)
+        assert len(errors) == 1
+        assert errors[0]['type'] == 'missing'
+
+    def test_int_field_no_default_strict_mode_empty_string(self) -> None:
+        """Test that int field without default in strict mode raises type error for ''."""
+
+        class Model(BaseModel):
+            model_config = ConfigDict(strict=True)
+            count: Annotated[int, EmptyStrToDefault()]
+
+        with pytest.raises(ValidationError) as exc_info:
+            Model(count='')
+
+        errors = exc_info.value.errors(include_url=False)
+        assert len(errors) == 1
+        assert errors[0]['type'] == 'int_type'
+
+    def test_int_field_with_default_strict_mode_empty_string(self) -> None:
+        """Test that int field WITH default in strict mode uses default for ''."""
+
+        class Model(BaseModel):
+            model_config = ConfigDict(strict=True)
+            count: Annotated[int, EmptyStrToDefault()] = 42
+
+        m = Model(count='')
+        assert m.count == 42

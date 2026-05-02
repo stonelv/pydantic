@@ -2680,17 +2680,7 @@ def wrap_default(field_info: FieldInfo, schema: core_schema.CoreSchema) -> core_
             value: Any, handler: core_schema.ValidatorFunctionWrapHandler
         ) -> Any:
             if value == '':
-                if field_info.default_factory:
-                    if takes_validated_data_argument(field_info.default_factory):
-                        default_value = field_info.default_factory({})
-                    else:
-                        default_value = field_info.default_factory()
-                else:
-                    default_value = field_info.default
-
-                if field_info.validate_default:
-                    return handler(default_value)
-                return default_value
+                return handler(PydanticUndefined)
             return handler(value)
 
         return core_schema.no_info_wrap_validator_function(

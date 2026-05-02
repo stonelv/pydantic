@@ -157,12 +157,121 @@ impl Validator for UuidValidator {
     }
 }
 
+const UUID_HYPHENATED_LEN: usize = 36;
+const UUID_SIMPLE_LEN: usize = 32;
+const UUID_BYTES_LEN: usize = 16;
+
+const HYPHEN_POSITIONS: [usize; 4] = [8, 13, 18, 23];
+
+fn is_hex_char(c: u8) -> bool {
+    matches!(c, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+}
+
+fn fast_check_uuid_str<'py>(
+    uuid_str: &str,
+    input: &(impl Input<'py> + ?Sized),
+) -> ValResult<()> {
+    let len = uuid_str.len();
+
+    if len != UUID_HYPHENATED_LEN && len != UUID_SIMPLE_LEN {
+        return Err(ValError::new(
+            ErrorType::UuidInvalidLength {
+                expected: if len > UUID_HYPHENATED_LEN {
+                    UUID_HYPHENATED_LEN
+                } else {
+                    UUID_SIMPLE_LEN
+                },
+                actual: len,
+                context: None,
+            },
+            input,
+        ));
+    }
+
+    let bytes = uuid_str.as_bytes();
+
+    if len == UUID_HYPHENATED_LEN {
+        for &pos in &HYPHEN_POSITIONS {
+            if bytes[pos] != b'-' {
+                return Err(ValError::new(
+                    ErrorType::UuidInvalidHyphenPosition {
+                        index: pos + 1,
+                        context: None,
+                    },
+                    input,
+                ));
+            }
+        }
+
+        for (i, &byte) in bytes.iter().enumerate() {
+            if HYPHEN_POSITIONS.contains(&i) {
+                continue;
+            }
+            if !is_hex_char(byte) {
+                return Err(ValError::new(
+                    ErrorType::UuidInvalidCharacter {
+                        character: (byte as char).to_string(),
+                        index: i + 1,
+                        context: None,
+                    },
+                    input,
+                ));
+            }
+        }
+    } else {
+        for (i, &byte) in bytes.iter().enumerate() {
+            if !is_hex_char(byte) {
+                return Err(ValError::new(
+                    ErrorType::UuidInvalidCharacter {
+                        character: (byte as char).to_string(),
+                        index: i + 1,
+                        context: None,
+                    },
+                    input,
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_uuid_bytes<'py>(
+    bytes: &[u8],
+    input: &(impl Input<'py> + ?Sized),
+) -> ValResult<Uuid> {
+    let len = bytes.len();
+    if len != UUID_BYTES_LEN {
+        return Err(ValError::new(
+            ErrorType::UuidInvalidByteLength {
+                expected: UUID_BYTES_LEN,
+                actual: len,
+                context: None,
+            },
+            input,
+        ));
+    }
+
+    Uuid::from_slice(bytes).map_err(|e| {
+        ValError::new(
+            ErrorType::UuidParsing {
+                error: e.to_string(),
+                context: None,
+            },
+            input,
+        )
+    })
+}
+
 impl UuidValidator {
     fn get_uuid<'py>(&self, input: &(impl Input<'py> + ?Sized)) -> ValResult<Uuid> {
         let uuid = match input.validate_str(true, false).ok().map(ValidationMatch::into_inner) {
             Some(either_string) => {
                 let cow = either_string.as_cow()?;
                 let uuid_str = cow.as_ref();
+
+                fast_check_uuid_str(uuid_str, input)?;
+
                 Uuid::parse_str(uuid_str).map_err(|e| {
                     ValError::new(
                         ErrorType::UuidParsing {
@@ -180,21 +289,18 @@ impl UuidValidator {
                     .into_inner();
                 let bytes_slice = either_bytes.as_slice();
 
-                // Try parsing as utf8, if it fails fall back to bytes
-                if let Ok(utf8_str) = from_utf8(bytes_slice)
-                    && let Ok(uuid) = Uuid::parse_str(utf8_str)
-                {
-                    uuid
+                if let Ok(utf8_str) = from_utf8(bytes_slice) {
+                    if fast_check_uuid_str(utf8_str, input).is_ok() {
+                        if let Ok(uuid) = Uuid::parse_str(utf8_str) {
+                            uuid
+                        } else {
+                            parse_uuid_bytes(bytes_slice, input)?
+                        }
+                    } else {
+                        parse_uuid_bytes(bytes_slice, input)?
+                    }
                 } else {
-                    Uuid::from_slice(bytes_slice).map_err(|e| {
-                        ValError::new(
-                            ErrorType::UuidParsing {
-                                error: e.to_string(),
-                                context: None,
-                            },
-                            input,
-                        )
-                    })?
+                    parse_uuid_bytes(bytes_slice, input)?
                 }
             }
         };

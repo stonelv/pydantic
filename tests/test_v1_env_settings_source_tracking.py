@@ -134,7 +134,7 @@ class TestEnvSettingsSource:
     """Tests for EnvSettingsSource with source tracking."""
 
     def test_source_tracking_env_vars(self):
-        """Test that environment variables are tracked correctly."""
+        """Test that environment variables are tracked correctly with original casing."""
 
         class Settings(BaseSettings):
             foo: str = 'default_foo'
@@ -150,15 +150,17 @@ class TestEnvSettingsSource:
             assert foo_source is not None
             assert foo_source.source_type == SettingsSourceType.ENV_VAR
             assert foo_source.raw_value == 'env_foo'
-            assert foo_source.source_details.get('env_name') == 'foo'
+            assert foo_source.source_details.get('env_name') == 'FOO'
+            assert foo_source.source_details.get('env_name_lower') == 'foo'
 
             bar_source = settings.get_field_source('bar')
             assert bar_source is not None
             assert bar_source.source_type == SettingsSourceType.ENV_VAR
             assert bar_source.raw_value == '100'
+            assert bar_source.source_details.get('env_name') == 'BAR'
 
     def test_source_tracking_dotenv(self, tmp_path):
-        """Test that .env file values are tracked correctly."""
+        """Test that .env file values are tracked correctly with original casing."""
         env_file = tmp_path / '.env'
         env_file.write_text('FOO=dotenv_value\nBAR=200')
 
@@ -180,6 +182,7 @@ class TestEnvSettingsSource:
             assert foo_source.source_type == SettingsSourceType.DOTENV
             assert foo_source.raw_value == 'dotenv_value'
             assert str(env_file) in foo_source.source_name
+            assert foo_source.source_details.get('env_name') == 'FOO'
 
     def test_env_var_takes_priority_over_dotenv(self, tmp_path):
         """Test that env vars take priority over .env file values."""
@@ -198,6 +201,7 @@ class TestEnvSettingsSource:
             assert settings.foo == 'env_value'
             source = settings.get_field_source('foo')
             assert source.source_type == SettingsSourceType.ENV_VAR
+            assert source.source_details.get('env_name') == 'FOO'
 
 
 class TestDefaultValues:
@@ -454,3 +458,155 @@ class TestComplexTypes:
             source = settings.get_field_source('my_list')
             assert source.source_type == SettingsSourceType.ENV_VAR
             assert source.raw_value == 'a,b,c'
+            assert source.source_details.get('env_name') == 'MY_LIST'
+
+
+class TestPriorityAndCoverage:
+    """Tests for priority logic and source coverage."""
+
+    def test_init_overrides_env(self):
+        """Test that init kwargs override env vars in source tracking."""
+
+        class Settings(BaseSettings):
+            foo: str = 'default'
+
+        with mock.patch.dict(os.environ, {'FOO': 'env_value'}):
+            settings = Settings(_track_sources=True, foo='init_value')
+
+            assert settings.foo == 'init_value'
+            source = settings.get_field_source('foo')
+            assert source.source_type == SettingsSourceType.INIT
+
+    def test_env_overrides_default(self):
+        """Test that env vars override default values in source tracking."""
+
+        class Settings(BaseSettings):
+            foo: str = 'default'
+
+        with mock.patch.dict(os.environ, {'FOO': 'env_value'}):
+            settings = Settings(_track_sources=True)
+
+            assert settings.foo == 'env_value'
+            source = settings.get_field_source('foo')
+            assert source.source_type == SettingsSourceType.ENV_VAR
+
+    def test_custom_source_priority_order(self):
+        """Test that customise_sources order determines priority."""
+
+        def source_low(settings):
+            return {'value': 'low'}
+
+        def source_medium(settings):
+            return {'value': 'medium'}
+
+        def source_high(settings):
+            return {'value': 'high'}
+
+        class Settings(BaseSettings):
+            value: str = 'default'
+
+            class Config:
+                @classmethod
+                def customise_sources(cls, init_settings, env_settings, file_secret_settings):
+                    return (
+                        init_settings,
+                        source_high,
+                        source_medium,
+                        source_low,
+                    )
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            settings = Settings(_track_sources=True)
+
+            assert settings.value == 'high'
+
+    def test_multiple_sources_different_fields(self):
+        """Test different fields from different sources."""
+
+        def source_a(settings):
+            return {'field_a': 'from_a'}
+
+        def source_b(settings):
+            return {'field_b': 'from_b'}
+
+        class Settings(BaseSettings):
+            field_a: str = 'default_a'
+            field_b: str = 'default_b'
+
+            class Config:
+                @classmethod
+                def customise_sources(cls, init_settings, env_settings, file_secret_settings):
+                    return (
+                        init_settings,
+                        source_a,
+                        source_b,
+                    )
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            settings = Settings(_track_sources=True)
+
+            assert settings.field_a == 'from_a'
+            assert settings.field_b == 'from_b'
+
+    def test_same_field_multiple_sources(self):
+        """Test that highest priority source wins for same field."""
+
+        def source_low(settings):
+            return {'shared': 'low_value'}
+
+        def source_medium(settings):
+            return {'shared': 'medium_value'}
+
+        def source_high(settings):
+            return {'shared': 'high_value'}
+
+        class Settings(BaseSettings):
+            shared: str = 'default'
+
+            class Config:
+                @classmethod
+                def customise_sources(cls, init_settings, env_settings, file_secret_settings):
+                    return (
+                        init_settings,
+                        source_high,
+                        source_medium,
+                        source_low,
+                    )
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            settings = Settings(_track_sources=True)
+
+            assert settings.shared == 'high_value'
+
+
+class TestDictMergeSourceTracking:
+    """Tests for dict merge scenarios with source tracking."""
+
+    def test_dict_values_from_multiple_sources(self):
+        """Test that dict values are merged and source is tracked correctly."""
+
+        def source_low(settings):
+            return {'config': {'timeout': 10, 'host': 'localhost'}}
+
+        def source_high(settings):
+            return {'config': {'timeout': 30, 'debug': True}}
+
+        class Settings(BaseSettings):
+            config: dict = {}
+
+            class Config:
+                @classmethod
+                def customise_sources(cls, init_settings, env_settings, file_secret_settings):
+                    return (
+                        init_settings,
+                        source_high,
+                        source_low,
+                    )
+
+        with mock.patch.dict(os.environ, {}, clear=True):
+            settings = Settings(_track_sources=True)
+
+            assert settings.config == {'timeout': 30, 'host': 'localhost', 'debug': True}
+
+            source = settings.get_field_source('config')
+            assert source is not None

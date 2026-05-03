@@ -202,13 +202,17 @@ class BaseSettings(BaseModel):
         if not sources:
             return {}, {}
 
-        all_source_results: List[SourceResult] = []
+        values_list: List[Dict[str, Any]] = []
+        sources_list: List[Dict[str, FieldSourceInfo]] = []
+
         for source in sources:
             if hasattr(source, '__call_with_sources__'):
                 result = source.__call_with_sources__(self)
-                all_source_results.append(result)
+                values_list.append(result.values)
+                sources_list.append(result.sources)
             else:
                 values = source(self)
+                values_list.append(values)
                 source_type = self._infer_source_type(source)
                 sources_dict: Dict[str, FieldSourceInfo] = {}
                 for key, value in values.items():
@@ -217,24 +221,55 @@ class BaseSettings(BaseModel):
                         raw_value=value,
                         source_name=getattr(source, '__class__', source).__name__,
                     )
-                all_source_results.append(SourceResult(values=values, sources=sources_dict))
+                sources_list.append(sources_dict)
 
-        final_values: Dict[str, Any] = {}
-        final_sources: Dict[str, FieldSourceInfo] = {}
+        if not values_list:
+            return {}, {}
 
-        for result in reversed(all_source_results):
-            for key, value in result.values.items():
-                if key in final_values:
-                    if isinstance(final_values[key], dict) and isinstance(value, dict):
-                        final_values[key] = deep_update(final_values[key], value)
-                    else:
-                        final_values[key] = value
-                    final_sources[key] = result.sources[key]
-                else:
-                    final_values[key] = value
-                    final_sources[key] = result.sources[key]
+        final_values = deep_update(*reversed(values_list))
+
+        final_sources = self._merge_sources_by_priority(sources_list, values_list)
 
         return final_values, final_sources
+
+    def _merge_sources_by_priority(
+        self,
+        sources_list: List[Dict[str, FieldSourceInfo]],
+        values_list: List[Dict[str, Any]],
+    ) -> Dict[str, FieldSourceInfo]:
+        """Merge source information based on priority.
+
+        Priority rule:
+        - sources_list[0] has highest priority (first in customise_sources return order)
+        - sources_list[-1] has lowest priority
+
+        For each field, the winning source is the highest priority source that
+        provides that field.
+
+        For dict deep merge scenarios:
+        - If source A (high priority) provides {'config': {'a': 1}}
+        - And source B (low priority) provides {'config': {'b': 2}}
+        - The merged value is {'config': {'a': 1, 'b': 2}}
+        - The source is A (highest priority source that provides 'config')
+
+        Args:
+            sources_list: List of source info dicts, ordered from highest to lowest priority
+            values_list: List of value dicts, same order as sources_list
+
+        Returns:
+            Merged source info dict
+        """
+        final_sources: Dict[str, FieldSourceInfo] = {}
+
+        for i in reversed(range(len(sources_list))):
+            sources_dict = sources_list[i]
+            values_dict = values_list[i]
+
+            for key, source_info in sources_dict.items():
+                if key in values_dict:
+                    final_sources[key] = source_info
+
+        return final_sources
 
     def _infer_source_type(self, source: Any) -> SettingsSourceType:
         source_name = source.__class__.__name__
@@ -329,6 +364,11 @@ class BaseSettings(BaseModel):
         Returns a dictionary where each key corresponds to a field, and the value is
         a dictionary containing 'value' (the field value) and 'source' (source information).
 
+        Source Priority Rules:
+        - The order returned by `customise_sources()` determines priority.
+        - First source has highest priority, last has lowest.
+        - For dict deep merge: the highest priority source that provides the field wins.
+
         Args:
             include: Fields to include.
             exclude: Fields to exclude.
@@ -338,18 +378,7 @@ class BaseSettings(BaseModel):
             exclude_none: Whether to exclude fields with None values.
 
         Returns:
-            Dictionary in the format:
-            {
-                'field_name': {
-                    'value': <field_value>,
-                    'source': {
-                        'source_type': 'init' | 'env_var' | 'dotenv' | 'secrets' | 'default',
-                        'raw_value': <raw_value_before_validation>,
-                        'source_name': <source_name>,
-                        'source_details': <additional_details>
-                    }
-                }
-            }
+            Dictionary with values and source information.
 
         Raises:
             ValueError: If source tracking is not enabled.
@@ -487,31 +516,46 @@ class EnvSettingsSource:
         self.env_prefix_len: int = env_prefix_len
 
     def __call__(self, settings: BaseSettings) -> Dict[str, Any]:
-        return self._build_values(settings)[0]
+        return self._build_values(settings, track_sources=False)[0]
 
     def __call_with_sources__(self, settings: BaseSettings) -> SourceResult:
-        values, sources = self._build_values(settings)
+        values, sources = self._build_values(settings, track_sources=True)
         return SourceResult(values=values, sources=sources)
 
-    def _build_values(self, settings: BaseSettings) -> Tuple[Dict[str, Any], Dict[str, FieldSourceInfo]]:
+    def _build_values(
+        self, settings: BaseSettings, track_sources: bool = False
+    ) -> Tuple[Dict[str, Any], Dict[str, FieldSourceInfo]]:
         d: Dict[str, Any] = {}
         sources: Dict[str, FieldSourceInfo] = {}
 
-        if settings.__config__.case_sensitive:
-            env_vars_lower: Dict[str, Tuple[str, str]] = {k.lower(): (k, v) for k, v in os.environ.items()}
-        else:
-            env_vars_lower = {k.lower(): (k, v) for k, v in os.environ.items()}
+        case_sensitive = settings.__config__.case_sensitive
 
-        dotenv_vars = self._read_env_files(settings.__config__.case_sensitive)
+        env_vars_original: Dict[str, str] = dict(os.environ)
+        dotenv_vars_original: Dict[str, Optional[str]] = self._read_env_files_original()
 
-        combined_vars: Dict[str, Tuple[Any, SettingsSourceType, str, Optional[str]]] = {}
+        env_vars_lower: Dict[str, Tuple[str, str]] = {}
+        for key, value in env_vars_original.items():
+            key_lower = key if case_sensitive else key.lower()
+            if key_lower not in env_vars_lower:
+                env_vars_lower[key_lower] = (key, value)
 
-        for key_lower, (original_key, value) in dotenv_vars.items():
-            combined_vars[key_lower] = (value, SettingsSourceType.DOTENV, str(self.env_file), original_key)
+        dotenv_vars_lower: Dict[str, Tuple[str, Optional[str]]] = {}
+        for key, value in dotenv_vars_original.items():
+            key_lower = key if case_sensitive else key.lower()
+            if key_lower not in dotenv_vars_lower:
+                dotenv_vars_lower[key_lower] = (key, value)
+
+        combined_vars: Dict[str, Tuple[Any, SettingsSourceType, Optional[str]]] = {}
+        combined_vars_original_keys: Dict[str, str] = {}
+
+        for key_lower, (original_key, value) in dotenv_vars_lower.items():
+            combined_vars[key_lower] = (value, SettingsSourceType.DOTENV, str(self.env_file))
+            combined_vars_original_keys[key_lower] = original_key
 
         for key_lower, (original_key, value) in env_vars_lower.items():
             if key_lower not in combined_vars:
-                combined_vars[key_lower] = (value, SettingsSourceType.ENV_VAR, original_key, original_key)
+                combined_vars[key_lower] = (value, SettingsSourceType.ENV_VAR, original_key)
+                combined_vars_original_keys[key_lower] = original_key
 
         lookup_vars: Dict[str, Any] = {k: v[0] for k, v in combined_vars.items()}
 
@@ -519,13 +563,14 @@ class EnvSettingsSource:
             env_val: Optional[str] = None
             source_type: Optional[SettingsSourceType] = None
             source_name: Optional[str] = None
-            matched_env_name: Optional[str] = None
+            matched_env_name_lower: Optional[str] = None
             original_env_name: Optional[str] = None
 
-            for env_name in field.field_info.extra['env_names']:
-                if env_name in combined_vars:
-                    env_val, source_type, source_name, original_env_name = combined_vars[env_name]
-                    matched_env_name = env_name
+            for env_name_lower in field.field_info.extra['env_names']:
+                if env_name_lower in combined_vars:
+                    env_val, source_type, source_name = combined_vars[env_name_lower]
+                    matched_env_name_lower = env_name_lower
+                    original_env_name = combined_vars_original_keys.get(env_name_lower)
                     break
 
             is_complex, allow_parse_failure = self.field_is_complex(field)
@@ -534,14 +579,14 @@ class EnvSettingsSource:
                     env_val_built = self.explode_env_vars(field, lookup_vars)
                     if env_val_built:
                         d[field.alias] = env_val_built
-                        if matched_env_name and source_type:
+                        if track_sources and matched_env_name_lower and source_type:
                             sources[field.alias] = FieldSourceInfo(
                                 source_type=source_type,
                                 raw_value=env_val_built,
                                 source_name=source_name,
                                 source_details={
-                                    'env_name': original_env_name if original_env_name else matched_env_name,
-                                    'env_name_lower': matched_env_name,
+                                    'env_name': original_env_name if original_env_name else matched_env_name_lower,
+                                    'env_name_lower': matched_env_name_lower,
                                     'is_complex': True,
                                     'is_exploded': True,
                                 },
@@ -552,7 +597,9 @@ class EnvSettingsSource:
                         env_val = settings.__config__.parse_env_var(field.name, env_val)
                     except ValueError as e:
                         if not allow_parse_failure:
-                            raise SettingsError(f'error parsing env var "{original_env_name or matched_env_name}"') from e
+                            raise SettingsError(
+                                f'error parsing env var "{original_env_name or matched_env_name_lower}"'
+                            ) from e
 
                     if isinstance(env_val, dict):
                         exploded = self.explode_env_vars(field, lookup_vars)
@@ -562,34 +609,39 @@ class EnvSettingsSource:
                         final_value = env_val
                         d[field.alias] = final_value
 
-                    if source_type:
+                    if track_sources and source_type:
                         sources[field.alias] = FieldSourceInfo(
                             source_type=source_type,
                             raw_value=raw_env_val,
                             source_name=source_name,
                             source_details={
-                                'env_name': original_env_name if original_env_name else matched_env_name,
-                                'env_name_lower': matched_env_name,
+                                'env_name': original_env_name if original_env_name else matched_env_name_lower,
+                                'env_name_lower': matched_env_name_lower,
                                 'is_complex': True,
                                 'parsed_value': env_val,
                             },
                         )
             elif env_val is not None:
                 d[field.alias] = env_val
-                if source_type:
+                if track_sources and source_type:
                     sources[field.alias] = FieldSourceInfo(
                         source_type=source_type,
                         raw_value=env_val,
                         source_name=source_name,
                         source_details={
-                            'env_name': original_env_name if original_env_name else matched_env_name,
-                            'env_name_lower': matched_env_name,
+                            'env_name': original_env_name if original_env_name else matched_env_name_lower,
+                            'env_name_lower': matched_env_name_lower,
                         },
                     )
 
         return d, sources
 
-    def _read_env_files(self, case_sensitive: bool) -> Dict[str, Tuple[str, Optional[str]]]:
+    def _read_env_files_original(self) -> Dict[str, Optional[str]]:
+        """Read .env files returning original key casing.
+
+        This is similar to read_env_file but preserves original key names.
+        It uses the same dotenv_values call internally.
+        """
         env_files = self.env_file
         if env_files is None:
             return {}
@@ -597,15 +649,23 @@ class EnvSettingsSource:
         if isinstance(env_files, (str, os.PathLike)):
             env_files = [env_files]
 
-        dotenv_vars: Dict[str, Tuple[str, Optional[str]]] = {}
+        dotenv_vars: Dict[str, Optional[str]] = {}
         for env_file in env_files:
             env_path = Path(env_file).expanduser()
             if env_path.is_file():
-                raw_vars = read_env_file_raw(env_path, encoding=self.env_file_encoding)
-                for original_key, value in raw_vars.items():
-                    key_lower = original_key if case_sensitive else original_key.lower()
-                    if key_lower not in dotenv_vars:
-                        dotenv_vars[key_lower] = (original_key, value)
+                try:
+                    from dotenv import dotenv_values
+                except ImportError as e:
+                    raise ImportError(
+                        'python-dotenv is not installed, run `pip install pydantic[dotenv]`'
+                    ) from e
+
+                file_vars: Dict[str, Optional[str]] = dotenv_values(
+                    env_path, encoding=self.env_file_encoding or 'utf8'
+                )
+                for key, value in file_vars.items():
+                    if key not in dotenv_vars:
+                        dotenv_vars[key] = value
 
         return dotenv_vars
 
@@ -651,13 +711,15 @@ class SecretsSettingsSource:
         self.secrets_dir: Optional[StrPath] = secrets_dir
 
     def __call__(self, settings: BaseSettings) -> Dict[str, Any]:
-        return self._build_values(settings)[0]
+        return self._build_values(settings, track_sources=False)[0]
 
     def __call_with_sources__(self, settings: BaseSettings) -> SourceResult:
-        values, sources = self._build_values(settings)
+        values, sources = self._build_values(settings, track_sources=True)
         return SourceResult(values=values, sources=sources)
 
-    def _build_values(self, settings: BaseSettings) -> Tuple[Dict[str, Any], Dict[str, FieldSourceInfo]]:
+    def _build_values(
+        self, settings: BaseSettings, track_sources: bool = False
+    ) -> Tuple[Dict[str, Any], Dict[str, FieldSourceInfo]]:
         secrets: Dict[str, Any] = {}
         sources: Dict[str, FieldSourceInfo] = {}
 
@@ -690,16 +752,17 @@ class SecretsSettingsSource:
                             raise SettingsError(f'error parsing env var "{env_name}"') from e
 
                     secrets[field.alias] = secret_value
-                    sources[field.alias] = FieldSourceInfo(
-                        source_type=SettingsSourceType.SECRETS,
-                        raw_value=raw_secret,
-                        source_name=str(path),
-                        source_details={
-                            'env_name': env_name,
-                            'secrets_dir': str(self.secrets_dir),
-                            'is_complex': field.is_complex(),
-                        },
-                    )
+                    if track_sources:
+                        sources[field.alias] = FieldSourceInfo(
+                            source_type=SettingsSourceType.SECRETS,
+                            raw_value=raw_secret,
+                            source_name=str(path),
+                            source_details={
+                                'env_name': env_name,
+                                'secrets_dir': str(self.secrets_dir),
+                                'is_complex': field.is_complex(),
+                            },
+                        )
                 else:
                     warnings.warn(
                         f'attempted to load secret file "{path}" but found a {path_type(path)} instead.',
@@ -709,19 +772,6 @@ class SecretsSettingsSource:
 
     def __repr__(self) -> str:
         return f'SecretsSettingsSource(secrets_dir={self.secrets_dir!r})'
-
-
-def read_env_file_raw(
-    file_path: StrPath, *, encoding: str = None
-) -> Dict[str, Optional[str]]:
-    """Read .env file preserving original key casing."""
-    try:
-        from dotenv import dotenv_values
-    except ImportError as e:
-        raise ImportError('python-dotenv is not installed, run `pip install pydantic[dotenv]`') from e
-
-    file_vars: Dict[str, Optional[str]] = dotenv_values(file_path, encoding=encoding or 'utf8')
-    return file_vars
 
 
 def read_env_file(

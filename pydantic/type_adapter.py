@@ -23,7 +23,17 @@ from typing_extensions import ParamSpec, is_typeddict
 from pydantic.errors import PydanticUserError
 from pydantic.main import BaseModel, IncEx
 
-from ._internal import _config, _generate_schema, _mock_val_ser, _namespace_utils, _repr, _typing_extra, _utils
+from ._internal import (
+    _config,
+    _generate_schema,
+    _mock_val_ser,
+    _namespace_utils,
+    _repr,
+    _type_adapter_cache,
+    _typing_extra,
+    _utils,
+)
+from ._internal._type_adapter_cache import TypeAdapterCache, get_global_cache
 from .config import ConfigDict, ExtraValues
 from .errors import PydanticUndefinedAnnotation
 from .json_schema import (
@@ -98,6 +108,29 @@ class TypeAdapter(Generic[T]):
                 with potential change in behavior/support. It's default value is 2 because internally,
                 the `TypeAdapter` class makes another call to fetch the frame.
         module: The module that passes to plugin if provided.
+        cache: Optional cache to use for reusing precompiled core schemas, validators, and serializers.
+            This can significantly improve performance when creating multiple `TypeAdapter` instances
+            for the same type. Use `TypeAdapter.precompile()` to pre-warm the cache.
+
+            !!! note "For library authors"
+                This is particularly useful for web frameworks and other libraries that create many
+                `TypeAdapter` instances during request handling. Precompile types during app startup
+                and pass the cache to all `TypeAdapter` instantiations.
+
+            Example:
+                ```python
+                from pydantic import TypeAdapter, TypeAdapterCache
+
+                cache = TypeAdapterCache()
+
+                # Precompile during startup
+                TypeAdapter.precompile([(list[int], None), (dict[str, int], None)], cache=cache)
+
+                # Reuse cache during runtime
+                ta = TypeAdapter(list[int], cache=cache)
+                ```
+        _use_global_cache: Whether to use the global cache (singleton). Defaults to False.
+            If both `cache` and `_use_global_cache=True` are provided, `cache` takes precedence.
 
     Attributes:
         core_schema: The core schema for the type.
@@ -176,6 +209,8 @@ class TypeAdapter(Generic[T]):
         config: ConfigDict | None = ...,
         _parent_depth: int = ...,
         module: str | None = ...,
+        cache: TypeAdapterCache | None = ...,
+        _use_global_cache: bool = ...,
     ) -> None: ...
 
     # This second overload is for unsupported special forms (such as Annotated, Union, etc.)
@@ -189,6 +224,8 @@ class TypeAdapter(Generic[T]):
         config: ConfigDict | None = ...,
         _parent_depth: int = ...,
         module: str | None = ...,
+        cache: TypeAdapterCache | None = ...,
+        _use_global_cache: bool = ...,
     ) -> None: ...
 
     def __init__(
@@ -198,6 +235,8 @@ class TypeAdapter(Generic[T]):
         config: ConfigDict | None = None,
         _parent_depth: int = 2,
         module: str | None = None,
+        cache: TypeAdapterCache | None = None,
+        _use_global_cache: bool = False,
     ) -> None:
         if _type_has_config(type) and config is not None:
             raise PydanticUserError(
@@ -208,9 +247,13 @@ class TypeAdapter(Generic[T]):
                 code='type-adapter-config-unused',
             )
 
+        if cache is None and _use_global_cache:
+            cache = get_global_cache()
+
         self._type = type
         self._config = config
         self._parent_depth = _parent_depth
+        self._cache = cache
         self.pydantic_complete = False
 
         parent_frame = self._fetch_parent_frame()
@@ -281,6 +324,15 @@ class TypeAdapter(Generic[T]):
             self.pydantic_complete = False
             return False
 
+        if self._cache is not None and not force:
+            cached = self._cache.get(self._type, self._config)
+            if cached is not None:
+                self.core_schema = cached.core_schema
+                self.validator = cached.validator
+                self.serializer = cached.serializer
+                self.pydantic_complete = True
+                return True
+
         try:
             self.core_schema = _getattr_no_parents(self._type, '__pydantic_core_schema__')
             self.validator = _getattr_no_parents(self._type, '__pydantic_validator__')
@@ -295,6 +347,15 @@ class TypeAdapter(Generic[T]):
                 or isinstance(self.serializer, _mock_val_ser.MockValSer)
             ):
                 raise AttributeError()
+
+            if self._cache is not None:
+                self._cache.set(
+                    type_=self._type,
+                    config=self._config,
+                    core_schema=self.core_schema,
+                    validator=self.validator,
+                    serializer=self.serializer,
+                )
         except AttributeError:
             config_wrapper = _config.ConfigWrapper(self._config)
 
@@ -326,6 +387,15 @@ class TypeAdapter(Generic[T]):
                 plugin_settings=config_wrapper.plugin_settings,
             )
             self.serializer = SchemaSerializer(self.core_schema, core_config)
+
+            if self._cache is not None:
+                self._cache.set(
+                    type_=self._type,
+                    config=self._config,
+                    core_schema=self.core_schema,
+                    validator=self.validator,
+                    serializer=self.serializer,
+                )
 
         self.pydantic_complete = True
         return True
@@ -797,3 +867,157 @@ class TypeAdapter(Generic[T]):
             json_schema['description'] = description
 
         return json_schemas_map, json_schema
+
+    @staticmethod
+    def precompile(
+        types: Iterable[tuple[Any, ConfigDict | None]],
+        *,
+        cache: TypeAdapterCache | None = None,
+        _use_global_cache: bool = False,
+        _parent_depth: int = 2,
+    ) -> TypeAdapterCache:
+        """Precompile multiple types and store them in a cache.
+
+        This is designed for library authors to pre-warm the cache during
+        process startup with commonly used types, avoiding the overhead of
+        repeated schema generation and validator/serializer construction
+        during request handling.
+
+        Args:
+            types: An iterable of (type, config) tuples to precompile.
+            cache: Optional cache instance to use. If not provided and
+                `_use_global_cache` is False, a new cache will be created.
+            _use_global_cache: Whether to use the global singleton cache.
+                Defaults to False. If both `cache` and `_use_global_cache=True`
+                are provided, `cache` takes precedence.
+            _parent_depth: Depth at which to search for the parent frame
+                for resolving forward references. Defaults to 2.
+
+        Returns:
+            The cache instance containing the precompiled types.
+
+        Example:
+            ```python
+            from pydantic import TypeAdapter, TypeAdapterCache
+
+            # Create a cache and precompile types during startup
+            cache = TypeAdapter.precompile([
+                (list[int], None),
+                (dict[str, int], None),
+                (list[dict[str, int]], {'strict': True}),
+            ])
+
+            # Later, reuse the cache
+            ta = TypeAdapter(list[int], cache=cache)
+            result = ta.validate_python([1, 2, '3'])
+            ```
+
+        For web frameworks:
+            ```python
+            # During app startup
+            from pydantic import TypeAdapter, get_global_cache
+
+            TypeAdapter.precompile(
+                [(list[int], None), (dict[str, int], None)],
+                _use_global_cache=True
+            )
+
+            # During request handling (auto-uses global cache)
+            ta = TypeAdapter(list[int], _use_global_cache=True)
+            ```
+        """
+        if cache is None:
+            if _use_global_cache:
+                cache = get_global_cache()
+            else:
+                cache = TypeAdapterCache()
+
+        cache.precompile(types, _parent_depth=_parent_depth + 1)
+        return cache
+
+    @staticmethod
+    def clear_cache(
+        cache: TypeAdapterCache | None = None,
+        *,
+        _use_global_cache: bool = False,
+    ) -> None:
+        """Clear all entries from a cache.
+
+        Args:
+            cache: The cache to clear. If None and `_use_global_cache` is True,
+                clears the global cache.
+            _use_global_cache: Whether to use the global singleton cache.
+                Defaults to False.
+        """
+        if cache is None:
+            if _use_global_cache:
+                cache = get_global_cache()
+            else:
+                return
+
+        cache.clear()
+
+    @staticmethod
+    def get_cache_stats(
+        cache: TypeAdapterCache | None = None,
+        *,
+        _use_global_cache: bool = False,
+    ) -> dict[str, Any]:
+        """Get statistics for a cache.
+
+        Args:
+            cache: The cache to get stats for. If None and `_use_global_cache`
+                is True, uses the global cache.
+            _use_global_cache: Whether to use the global singleton cache.
+                Defaults to False.
+
+        Returns:
+            A dictionary containing cache statistics including hits, misses,
+            size, and hit rate.
+        """
+        if cache is None:
+            if _use_global_cache:
+                cache = get_global_cache()
+            else:
+                return {
+                    'hits': 0,
+                    'misses': 0,
+                    'size': 0,
+                    'precompiled_count': 0,
+                    'hit_rate': 0.0,
+                }
+
+        return cache.info()['stats']
+
+    @staticmethod
+    def invalidate_type(
+        type_: Any,
+        config: ConfigDict | None = None,
+        cache: TypeAdapterCache | None = None,
+        *,
+        _use_global_cache: bool = False,
+    ) -> bool:
+        """Invalidate a specific type from the cache.
+
+        This is useful when a type has been dynamically redefined and
+        the cached schema needs to be refreshed.
+
+        Args:
+            type_: The type to invalidate.
+            config: Optional config. If None, all config variants of this
+                type will be invalidated.
+            cache: The cache to invalidate from. If None and `_use_global_cache`
+                is True, uses the global cache.
+            _use_global_cache: Whether to use the global singleton cache.
+                Defaults to False.
+
+        Returns:
+            True if any entries were invalidated, False otherwise.
+        """
+        if cache is None:
+            if _use_global_cache:
+                cache = get_global_cache()
+            else:
+                return False
+
+        return cache.invalidate_type(type_, config)

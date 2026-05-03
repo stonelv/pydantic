@@ -8,6 +8,20 @@ from typing_extensions import Self
 from typing_inspection.introspection import Qualifier
 
 from pydantic._internal import _repr
+from pydantic._internal._error_format import (
+    FormattedErrorDetails,
+    LocCompressionConfig,
+    LocCompressionStrategy,
+    compress_loc,
+    format_error,
+    format_errors,
+    format_loc,
+    format_loc_item,
+    format_validation_error,
+    get_default_config,
+    loc_compression,
+    set_default_config,
+)
 
 from ._migration import getattr_migration
 from .version import version_short
@@ -20,6 +34,18 @@ __all__ = (
     'PydanticInvalidForJsonSchema',
     'PydanticForbiddenQualifier',
     'PydanticErrorCodes',
+    'LocCompressionStrategy',
+    'LocCompressionConfig',
+    'FormattedErrorDetails',
+    'format_loc_item',
+    'compress_loc',
+    'format_loc',
+    'format_error',
+    'format_errors',
+    'format_validation_error',
+    'get_default_config',
+    'set_default_config',
+    'loc_compression',
 )
 
 # We use this URL to allow for future flexibility about how we host the docs, while allowing for Pydantic

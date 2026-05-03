@@ -874,8 +874,7 @@ class TypeAdapter(Generic[T]):
         cache: TypeAdapterCache | None = None,
         _use_global_cache: bool = False,
         _parent_depth: int = 2,
-        raise_errors: bool = False,
-    ) -> tuple[int, list[PrecompileFailure], TypeAdapterCache]:
+    ) -> TypeAdapterCache:
         """Precompile multiple types and store them in a cache.
 
         This is designed for library authors to pre-warm the cache during
@@ -892,25 +891,16 @@ class TypeAdapter(Generic[T]):
                 are provided, `cache` takes precedence.
             _parent_depth: Depth at which to search for the parent frame
                 for resolving forward references. Defaults to 2.
-            raise_errors: If True, raises a PrecompileError if any type
-                fails to precompile. If False (default), collects failures
-                in the returned list.
 
         Returns:
-            A tuple of (success_count, failures, cache).
-            - success_count: Number of types successfully precompiled.
-            - failures: List of PrecompileFailure objects for failed types.
-            - cache: The cache instance containing the precompiled types.
-
-        Raises:
-            PrecompileError: If raise_errors=True and any type fails to precompile.
+            The cache instance containing the precompiled types.
 
         Example:
             ```python
             from pydantic import TypeAdapter, TypeAdapterCache
 
             # Create a cache and precompile types during startup
-            success, failures, cache = TypeAdapter.precompile([
+            cache = TypeAdapter.precompile([
                 (list[int], None),
                 (dict[str, int], None),
                 (list[dict[str, int]], {'strict': True}),
@@ -941,12 +931,11 @@ class TypeAdapter(Generic[T]):
             else:
                 cache = TypeAdapterCache()
 
-        success, failures = cache.precompile(
+        cache.precompile(
             types,
             _parent_depth=_parent_depth + 1,
-            raise_errors=raise_errors,
         )
-        return success, failures, cache
+        return cache
 
     @staticmethod
     def clear_cache(

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from .main import *
     from .networks import *
     from .type_adapter import TypeAdapter
+    from ._internal._type_adapter_cache import TypeAdapterCache, get_global_cache
     from .types import *
     from .validate_call_decorator import validate_call
     from .warnings import (
@@ -220,6 +221,8 @@ __all__ = (
     'FailFast',
     # type_adapter
     'TypeAdapter',
+    'TypeAdapterCache',
+    'get_global_cache',
     # version
     '__version__',
     'VERSION',
@@ -386,6 +389,8 @@ _dynamic_imports: 'dict[str, tuple[str, str]]' = {
     'FailFast': (__spec__.parent, '.types'),
     # type_adapter
     'TypeAdapter': (__spec__.parent, '.type_adapter'),
+    'TypeAdapterCache': (__spec__.parent, '._internal._type_adapter_cache'),
+    'get_global_cache': (__spec__.parent, '._internal._type_adapter_cache'),
     # warnings
     'PydanticDeprecatedSince20': (__spec__.parent, '.warnings'),
     'PydanticDeprecatedSince26': (__spec__.parent, '.warnings'),

@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import threading
-import time
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from pydantic import BaseModel, ConfigDict, TypeAdapter, TypeAdapterCache, get_global_cache
-from pydantic._internal._type_adapter_cache import CacheStats, _make_cache_key
+from pydantic import (
+    BaseModel,
+    CacheStats,
+    ConfigDict,
+    TypeAdapter,
+    TypeAdapterCache,
+    get_global_cache,
+    make_cache_key,
+)
+from pydantic.type_adapter_cache import PrecompileError, PrecompileFailure
 
 
 class TestTypeAdapterCache:
@@ -133,18 +140,38 @@ class TestTypeAdapterCache:
         assert info['stats']['misses'] == 1
         assert 'list[int]' in str(info['cached_types'])
 
+    def test_invalidate_version(self) -> None:
+        """Test version-based invalidation."""
+        cache = TypeAdapterCache()
+
+        TypeAdapter(list[int], cache=cache)
+
+        stats = cache.get_stats()
+        assert stats.size == 1
+
+        invalidated = cache.invalidate_version(1)
+        assert invalidated == 1
+
+        stats = cache.get_stats()
+        assert stats.size == 0
+
+        invalidated = cache.invalidate_version(1)
+        assert invalidated == 0
+
 
 class TestTypeAdapterPrecompile:
     """Tests for TypeAdapter.precompile static method."""
 
     def test_precompile_creates_cache(self) -> None:
-        """Test that precompile creates and returns a cache."""
-        cache = TypeAdapter.precompile([
+        """Test that precompile creates and returns a cache with correct values."""
+        success, failures, cache = TypeAdapter.precompile([
             (list[int], None),
             (dict[str, int], None),
         ])
 
         assert isinstance(cache, TypeAdapterCache)
+        assert success == 2
+        assert len(failures) == 0
 
         stats = cache.get_stats()
         assert stats.size == 2
@@ -154,10 +181,13 @@ class TestTypeAdapterPrecompile:
         """Test precompile with an existing cache."""
         cache = TypeAdapterCache()
 
-        TypeAdapter.precompile(
+        success, failures, _ = TypeAdapter.precompile(
             [(list[int], None), (dict[str, int], None)],
             cache=cache,
         )
+
+        assert success == 2
+        assert len(failures) == 0
 
         stats = cache.get_stats()
         assert stats.size == 2
@@ -166,10 +196,13 @@ class TestTypeAdapterPrecompile:
         """Test precompile with global cache."""
         TypeAdapter.clear_cache(_use_global_cache=True)
 
-        TypeAdapter.precompile(
+        success, failures, _ = TypeAdapter.precompile(
             [(list[int], None), (dict[str, int], None)],
             _use_global_cache=True,
         )
+
+        assert success == 2
+        assert len(failures) == 0
 
         global_cache = get_global_cache()
         stats = global_cache.get_stats()
@@ -177,9 +210,12 @@ class TestTypeAdapterPrecompile:
 
     def test_precompile_reuses_cache(self) -> None:
         """Test that TypeAdapter uses precompiled cache entries."""
-        cache = TypeAdapter.precompile([
+        success, failures, cache = TypeAdapter.precompile([
             (list[int], None),
         ])
+
+        assert success == 1
+        assert len(failures) == 0
 
         stats_before = cache.get_stats()
         assert stats_before.hits == 0
@@ -191,6 +227,37 @@ class TestTypeAdapterPrecompile:
         stats_after = cache.get_stats()
         assert stats_after.hits == 1
 
+    def test_precompile_returns_failures(self) -> None:
+        """Test that precompile returns failures instead of swallowing exceptions."""
+        class NotAType:
+            pass
+
+        invalid_type = 'not a valid type'
+
+        success, failures, cache = TypeAdapter.precompile([
+            (list[int], None),
+            (invalid_type, None),
+        ])
+
+        assert success == 1
+        assert len(failures) == 1
+        assert failures[0].type_ == invalid_type
+        assert isinstance(failures[0].exception, Exception)
+
+    def test_precompile_raises_with_raise_errors(self) -> None:
+        """Test that precompile raises PrecompileError when raise_errors=True."""
+        invalid_type = 'not a valid type'
+
+        with pytest.raises(PrecompileError) as exc_info:
+            TypeAdapter.precompile(
+                [(list[int], None), (invalid_type, None)],
+                raise_errors=True,
+            )
+
+        assert 'Precompile failed' in str(exc_info.value)
+        assert len(exc_info.value.failures) == 1
+        assert exc_info.value.failures[0].type_ == invalid_type
+
 
 class TestTypeAdapterCacheManagement:
     """Tests for cache management static methods."""
@@ -198,7 +265,9 @@ class TestTypeAdapterCacheManagement:
     def test_clear_cache(self) -> None:
         """Test clearing cache via static method."""
         cache = TypeAdapterCache()
-        TypeAdapter.precompile([(list[int], None)], cache=cache)
+        success, failures, _ = TypeAdapter.precompile([(list[int], None)], cache=cache)
+        assert success == 1
+        assert len(failures) == 0
 
         assert cache.get_stats().size == 1
 
@@ -221,7 +290,12 @@ class TestTypeAdapterCacheManagement:
     def test_invalidate_type_static(self) -> None:
         """Test invalidating type via static method."""
         cache = TypeAdapterCache()
-        TypeAdapter.precompile([(list[int], None), (dict[str, int], None)], cache=cache)
+        success, failures, _ = TypeAdapter.precompile(
+            [(list[int], None), (dict[str, int], None)],
+            cache=cache,
+        )
+        assert success == 2
+        assert len(failures) == 0
 
         assert cache.get_stats().size == 2
 
@@ -237,7 +311,9 @@ class TestThreadSafety:
     def test_concurrent_reads(self) -> None:
         """Test that concurrent reads are thread-safe."""
         cache = TypeAdapterCache()
-        TypeAdapter.precompile([(list[int], None)], cache=cache)
+        success, failures, _ = TypeAdapter.precompile([(list[int], None)], cache=cache)
+        assert success == 1
+        assert len(failures) == 0
 
         results: list[bool] = []
         errors: list[Exception] = []
@@ -367,22 +443,94 @@ class TestCacheKeyGeneration:
 
     def test_cache_key_equality(self) -> None:
         """Test that same types with same config produce same keys."""
-        key1 = _make_cache_key(list[int], None)
-        key2 = _make_cache_key(list[int], None)
+        key1 = make_cache_key(list[int], None)
+        key2 = make_cache_key(list[int], None)
 
         assert key1 == key2
         assert hash(key1) == hash(key2)
 
     def test_cache_key_different_types(self) -> None:
         """Test that different types produce different keys."""
-        key1 = _make_cache_key(list[int], None)
-        key2 = _make_cache_key(list[str], None)
+        key1 = make_cache_key(list[int], None)
+        key2 = make_cache_key(list[str], None)
 
         assert key1 != key2
 
     def test_cache_key_different_configs(self) -> None:
         """Test that different configs produce different keys."""
-        key1 = _make_cache_key(list[int], None)
-        key2 = _make_cache_key(list[int], {'strict': True})
+        key1 = make_cache_key(list[int], None)
+        key2 = make_cache_key(list[int], {'strict': True})
 
         assert key1 != key2
+
+    def test_cache_key_unhashable_config_returns_unique(self) -> None:
+        """Test that different unhashable config values produce different keys.
+
+        When config contains unhashable values (like custom objects with __hash__=None),
+        the cache key generation uses id(), ensuring that different objects
+        produce different keys. This prevents incorrect cache hits when different
+        config objects are used.
+
+        Note: The same object will produce the same key (correct behavior),
+        but different objects will produce different keys (prevents incorrect hits).
+        """
+
+        class UnhashableClass:
+            __hash__ = None
+
+            def __init__(self, value: int):
+                self.value = value
+
+        obj1 = UnhashableClass(1)
+        obj2 = UnhashableClass(1)
+
+        config1 = {'strict': obj1}
+        config2 = {'strict': obj2}
+
+        key1 = make_cache_key(list[int], config1)
+        key2 = make_cache_key(list[int], config2)
+
+        assert key1 != key2
+
+        same_key1 = make_cache_key(list[int], config1)
+        same_key2 = make_cache_key(list[int], config1)
+        assert same_key1 == same_key2
+
+
+class TestPublicAPIs:
+    """Tests for public API exports."""
+
+    def test_cache_stats_dataclass(self) -> None:
+        """Test that CacheStats is a proper dataclass."""
+        stats = CacheStats(hits=1, misses=2, size=3, precompiled_count=4)
+        assert stats.hits == 1
+        assert stats.misses == 2
+        assert stats.size == 3
+        assert stats.precompiled_count == 4
+
+    def test_precompile_failure_dataclass(self) -> None:
+        """Test that PrecompileFailure is a proper dataclass."""
+        exc = ValueError('test error')
+        failure = PrecompileFailure(type_=list[int], config={'strict': True}, exception=exc)
+
+        assert failure.type_ == list[int]
+        assert failure.config == {'strict': True}
+        assert failure.exception is exc
+
+    def test_precompile_error_exception(self) -> None:
+        """Test that PrecompileError is a proper exception."""
+        failures = [
+            PrecompileFailure(type_=list[int], config=None, exception=ValueError('test')),
+        ]
+        error = PrecompileError('Test error', failures)
+
+        assert str(error) == 'Test error'
+        assert error.failures == failures
+
+    def test_get_global_cache_singleton(self) -> None:
+        """Test that get_global_cache returns a singleton."""
+        cache1 = get_global_cache()
+        cache2 = get_global_cache()
+
+        assert cache1 is cache2
+        assert isinstance(cache1, TypeAdapterCache)

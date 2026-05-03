@@ -5,6 +5,15 @@ core schema, validator, and serializer. This allows library authors to
 precompile commonly used types during process startup and reuse them
 across multiple TypeAdapter instantiations.
 
+Important Design Principles:
+- **Conservative Caching**: If there's any doubt about whether a cached
+  entry would be correct for a given use case, we DO NOT cache. This is
+  safer than incorrect cache hits.
+- **Forward Refs**: Types containing forward references are NOT cached,
+  because their resolution depends on the calling context's namespace.
+- **Unhashable Configs**: If config contains unhashable values, caching
+  is disabled for that type+config combination.
+
 Example:
     >>> from pydantic import TypeAdapter, TypeAdapterCache, get_global_cache
     >>>
@@ -43,15 +52,17 @@ class CacheStats:
 
     Attributes:
         hits: Number of cache hits.
-        misses: Number of cache misses.
+        misses: Number of cache misses (including cache-disabled cases).
         size: Current number of entries in the cache.
         precompiled_count: Number of entries added via precompile.
+        disabled_count: Number of misses due to cache being disabled for that key.
     """
 
     hits: int = 0
     misses: int = 0
     size: int = 0
     precompiled_count: int = 0
+    disabled_count: int = 0
 
 
 @dataclass
@@ -65,13 +76,11 @@ class CachedTypeAdapterData:
         core_schema: The core schema for the type.
         validator: The schema validator.
         serializer: The schema serializer.
-        version: Version identifier for cache invalidation.
     """
 
     core_schema: CoreSchema
     validator: SchemaValidator | Any
     serializer: SchemaSerializer
-    version: int = field(default=1)
 
 
 @dataclass
@@ -92,43 +101,17 @@ class PrecompileFailure:
         return f'PrecompileFailure(type={self.type_!r}, config={self.config!r}, error={self.exception!r})'
 
 
-def _make_hashable(value: Any) -> Hashable:
-    """Convert a value to a hashable form for use in cache keys.
+class CacheDisabled(Exception):
+    """Raised when caching is disabled for a type+config combination.
 
-    This is a conservative implementation - if a value cannot be reliably
-    made hashable, it returns a sentinel value that will cause cache
-    misses (intentional, to avoid incorrect cache hits).
-
-    Args:
-        value: The value to convert.
-
-    Returns:
-        A hashable representation of the value, or a unique sentinel
-        if the value cannot be reliably hashed.
+    This is used internally to indicate that a particular key should not
+    be cached. Reasons include:
+    - Type contains forward references (namespace-dependent)
+    - Config contains unhashable values
     """
-    if isinstance(value, Hashable) and not isinstance(value, (list, dict, set)):
-        try:
-            hash(value)
-            return value
-        except Exception:
-            return id(value)
-    elif isinstance(value, dict):
-        try:
-            return frozenset((k, _make_hashable(v)) for k, v in sorted(value.items()))
-        except Exception:
-            return id(value)
-    elif isinstance(value, (list, tuple)):
-        try:
-            return tuple(_make_hashable(v) for v in value)
-        except Exception:
-            return id(value)
-    elif isinstance(value, set):
-        try:
-            return frozenset(_make_hashable(v) for v in value)
-        except Exception:
-            return id(value)
-    else:
-        return id(value)
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
 
 
 _RELEVANT_CONFIG_KEYS: frozenset[str] = frozenset({
@@ -161,22 +144,115 @@ _RELEVANT_CONFIG_KEYS: frozenset[str] = frozenset({
 })
 
 
-def _config_to_cache_key(config: ConfigDict | None) -> frozenset[tuple[str, Hashable]]:
-    """Convert a ConfigDict to a hashable form for cache key.
+def _make_hashable(value: Any) -> Hashable:
+    """Convert a value to a hashable form for use in cache keys.
 
-    Only includes config values that actually affect schema generation
-    and validation behavior. If any value cannot be reliably hashed,
-    returns a unique sentinel that will cause cache misses (safer than
-    incorrect cache hits).
+    Unlike the previous implementation, this does NOT use `id()` as a fallback.
+    If a value cannot be reliably hashed, it raises CacheDisabled.
 
     Args:
-        config: The ConfigDict to convert.
+        value: The value to convert.
 
     Returns:
-        A frozenset of key-value pairs that can be used in a cache key.
+        A hashable representation of the value.
+
+    Raises:
+        CacheDisabled: If the value cannot be reliably hashed.
     """
+    if isinstance(value, Hashable) and not isinstance(value, (list, dict, set)):
+        try:
+            hash(value)
+            return value
+        except Exception:
+            raise CacheDisabled(f'value type {type(value).__name__} is unhashable')
+    elif isinstance(value, dict):
+        try:
+            return frozenset((k, _make_hashable(v)) for k, v in sorted(value.items()))
+        except Exception:
+            raise CacheDisabled(f'dict contains unhashable values')
+    elif isinstance(value, (list, tuple)):
+        try:
+            return tuple(_make_hashable(v) for v in value)
+        except Exception:
+            raise CacheDisabled(f'{type(value).__name__} contains unhashable values')
+    elif isinstance(value, set):
+        try:
+            return frozenset(_make_hashable(v) for v in value)
+        except Exception:
+            raise CacheDisabled('set contains unhashable values')
+    else:
+        raise CacheDisabled(f'type {type(value).__name__} is not reliably hashable')
+
+
+def _type_has_forward_ref(type_: Any) -> bool:
+    """Check if a type contains forward references.
+
+    Forward references are strings like `'User'` or `typing.ForwardRef('User')`
+    that need to be resolved in a specific namespace context. Types containing
+    forward references should NOT be cached because their resolution is
+    context-dependent.
+
+    Args:
+        type_: The type to check.
+
+    Returns:
+        True if the type contains forward references, False otherwise.
+    """
+    import typing
+
+    if isinstance(type_, str):
+        return True
+
+    if isinstance(type_, typing.ForwardRef):
+        return True
+
+    origin = getattr(type_, '__origin__', None)
+    args = getattr(type_, '__args__', None)
+
+    if args:
+        for arg in args:
+            if _type_has_forward_ref(arg):
+                return True
+
+    if typing.get_origin(type_) is typing.Annotated:
+        args = typing.get_args(type_)
+        if args:
+            if _type_has_forward_ref(args[0]):
+                return True
+
+    return False
+
+
+def make_cache_key(
+    type_: Any,
+    config: ConfigDict | None,
+) -> tuple[Any, frozenset[tuple[str, Hashable]]]:
+    """Create a cache key from a type and config.
+
+    This is a public function that can be used to inspect or debug
+    cache key generation.
+
+    Important:
+        If caching should be disabled for this type+config combination,
+        this function raises CacheDisabled. Reasons for disabling include:
+        - Type contains forward references
+        - Config contains unhashable values
+
+    Args:
+        type_: The type to adapt.
+        config: The configuration for the TypeAdapter.
+
+    Returns:
+        A tuple that can be used as a dictionary key.
+
+    Raises:
+        CacheDisabled: If caching should be disabled for this combination.
+    """
+    if _type_has_forward_ref(type_):
+        raise CacheDisabled('type contains forward references (namespace-dependent)')
+
     if config is None:
-        return frozenset()
+        return (type_, frozenset())
 
     items: list[tuple[str, Hashable]] = []
     for key in _RELEVANT_CONFIG_KEYS:
@@ -185,27 +261,10 @@ def _config_to_cache_key(config: ConfigDict | None) -> frozenset[tuple[str, Hash
             try:
                 hashable_value = _make_hashable(value)
                 items.append((key, hashable_value))
-            except Exception:
-                return frozenset({('_cannot_hash', id(value))})
+            except CacheDisabled as e:
+                raise CacheDisabled(f'config.{key}: {e.reason}')
 
-    return frozenset(sorted(items))
-
-
-def make_cache_key(type_: Any, config: ConfigDict | None) -> tuple[Any, frozenset[tuple[str, Hashable]]]:
-    """Create a cache key from a type and config.
-
-    This is a public function that can be used to inspect or debug
-    cache key generation.
-
-    Args:
-        type_: The type to adapt.
-        config: The configuration for the TypeAdapter.
-
-    Returns:
-        A tuple that can be used as a dictionary key.
-    """
-    config_key = _config_to_cache_key(config)
-    return (type_, config_key)
+    return (type_, frozenset(sorted(items)))
 
 
 @final
@@ -215,6 +274,12 @@ class TypeAdapterCache:
     This cache is designed for library authors who want to precompile
     commonly used types during process startup and avoid the overhead
     of repeated schema generation and validator/serializer construction.
+
+    Conservative Caching Strategy:
+        - Types containing forward references are NOT cached (their resolution
+          depends on the calling context's namespace)
+        - Configs with unhashable values are NOT cached
+        - If in doubt, we do NOT cache (safer than incorrect hits)
 
     Example:
         >>> from pydantic import TypeAdapter, TypeAdapterCache
@@ -239,7 +304,6 @@ class TypeAdapterCache:
     Cache Invalidation:
         - Manual clearing via `clear()`
         - Type-level invalidation via `invalidate_type()`
-        - Version-based invalidation via `invalidate_version()`
     """
 
     def __init__(self, max_size: int | None = None) -> None:
@@ -254,7 +318,24 @@ class TypeAdapterCache:
         self._lock = threading.RLock()
         self._max_size = max_size
         self._stats = CacheStats()
-        self._version = 1
+
+    def _should_cache(
+        self, type_: Any, config: ConfigDict | None
+    ) -> tuple[bool, str | None]:
+        """Check if a type+config combination should be cached.
+
+        Args:
+            type_: The type to check.
+            config: The config to check.
+
+        Returns:
+            A tuple of (should_cache, reason_if_not).
+        """
+        try:
+            make_cache_key(type_, config)
+            return True, None
+        except CacheDisabled as e:
+            return False, e.reason
 
     def get(
         self, type_: Any, config: ConfigDict | None
@@ -267,8 +348,15 @@ class TypeAdapterCache:
 
         Returns:
             The cached data if found, None otherwise.
+            Also returns None if caching is disabled for this combination.
         """
-        key = make_cache_key(type_, config)
+        try:
+            key = make_cache_key(type_, config)
+        except CacheDisabled:
+            with self._lock:
+                self._stats.misses += 1
+                self._stats.disabled_count += 1
+            return None
 
         with self._lock:
             if key in self._cache:
@@ -284,7 +372,7 @@ class TypeAdapterCache:
         core_schema: CoreSchema,
         validator: SchemaValidator | Any,
         serializer: SchemaSerializer,
-    ) -> None:
+    ) -> bool:
         """Store data in the cache.
 
         Args:
@@ -293,8 +381,15 @@ class TypeAdapterCache:
             core_schema: The core schema for the type.
             validator: The schema validator.
             serializer: The schema serializer.
+
+        Returns:
+            True if the data was cached, False if caching was disabled
+            for this type+config combination.
         """
-        key = make_cache_key(type_, config)
+        try:
+            key = make_cache_key(type_, config)
+        except CacheDisabled:
+            return False
 
         with self._lock:
             if self._max_size is not None and len(self._cache) >= self._max_size:
@@ -304,9 +399,9 @@ class TypeAdapterCache:
                 core_schema=core_schema,
                 validator=validator,
                 serializer=serializer,
-                version=self._version,
             )
             self._stats.size = len(self._cache)
+            return True
 
     def _evict_one(self) -> None:
         """Evict one entry from the cache when max_size is reached.
@@ -391,12 +486,10 @@ class TypeAdapterCache:
     def clear(self) -> None:
         """Clear all entries from the cache.
 
-        This resets the cache to its initial empty state and increments
-        the version number to invalidate any references to old cached data.
+        This resets the cache to its initial empty state.
         """
         with self._lock:
             self._cache.clear()
-            self._version += 1
             self._stats = CacheStats()
 
     def invalidate_type(self, type_: Any, config: ConfigDict | None = None) -> bool:
@@ -412,7 +505,10 @@ class TypeAdapterCache:
         """
         with self._lock:
             if config is not None:
-                key = make_cache_key(type_, config)
+                try:
+                    key = make_cache_key(type_, config)
+                except CacheDisabled:
+                    return False
                 if key in self._cache:
                     del self._cache[key]
                     self._stats.size = len(self._cache)
@@ -424,29 +520,6 @@ class TypeAdapterCache:
                     del self._cache[key]
                 self._stats.size = len(self._cache)
                 return len(keys_to_remove) > 0
-
-    def invalidate_version(self, version: int) -> int:
-        """Invalidate all cache entries with a specific version.
-
-        This can be used to invalidate entries that were created before
-        a certain point in time.
-
-        Args:
-            version: The version to invalidate. All entries with this
-                version will be removed.
-
-        Returns:
-            The number of entries invalidated.
-        """
-        with self._lock:
-            keys_to_remove = [
-                k for k, v in self._cache.items()
-                if v.version == version
-            ]
-            for key in keys_to_remove:
-                del self._cache[key]
-            self._stats.size = len(self._cache)
-            return len(keys_to_remove)
 
     def get_stats(self) -> CacheStats:
         """Get current cache statistics.
@@ -460,6 +533,7 @@ class TypeAdapterCache:
                 misses=self._stats.misses,
                 size=len(self._cache),
                 precompiled_count=self._stats.precompiled_count,
+                disabled_count=self._stats.disabled_count,
             )
 
     def info(self) -> dict[str, Any]:
@@ -470,7 +544,6 @@ class TypeAdapterCache:
         """
         with self._lock:
             return {
-                'version': self._version,
                 'max_size': self._max_size,
                 'current_size': len(self._cache),
                 'stats': {
@@ -478,6 +551,7 @@ class TypeAdapterCache:
                     'misses': self._stats.misses,
                     'size': len(self._cache),
                     'precompiled_count': self._stats.precompiled_count,
+                    'disabled_count': self._stats.disabled_count,
                     'hit_rate': (
                         self._stats.hits / (self._stats.hits + self._stats.misses)
                         if (self._stats.hits + self._stats.misses) > 0
@@ -519,8 +593,8 @@ class TypeAdapterCache:
                 misses=self._stats.misses,
                 size=len(self._cache),
                 precompiled_count=self._stats.precompiled_count,
+                disabled_count=self._stats.disabled_count,
             )
-            temp_cache._version = self._version
             return temp_cache
 
     def __exit__(

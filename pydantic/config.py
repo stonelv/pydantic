@@ -15,6 +15,7 @@ from .errors import PydanticUserError
 from .warnings import PydanticDeprecatedSince211
 
 if TYPE_CHECKING:
+    from ._internal._error_format import LocCompressionConfig
     from ._internal._generate_schema import GenerateSchema as _GenerateSchema
     from .fields import ComputedFieldInfo, FieldInfo
 
@@ -791,6 +792,73 @@ class ConfigDict(TypedDict, total=False):
         a
           Input should be a valid string [type=string_type]
         '''
+    ```
+    """
+
+    loc_compression_config: 'LocCompressionConfig | None'
+    """
+    Configuration for compressing long error locations. Defaults to `None`.
+
+    When dealing with deeply nested data structures (e.g., lists containing lists,
+    or dicts containing lists), validation error locations can become very long,
+    making the error messages hard to read. This configuration allows you to
+    compress the location paths for better readability.
+
+    Note: This only affects the **display** of error locations. The machine-readable
+    `loc` field returned by `ValidationError.errors()` remains unchanged.
+
+    Available compression strategies:
+    - `LocCompressionStrategy.NONE`: No compression (default behavior).
+    - `LocCompressionStrategy.THRESHOLD`: Compress paths longer than `threshold`
+      by keeping the first `keep_start` and last `keep_end` items.
+    - `LocCompressionStrategy.COLLAPSE_INDICES`: Collapse consecutive integer indices.
+    - `LocCompressionStrategy.COLLAPSE_PATTERNS`: Collapse repeating key-index patterns.
+
+    Example with `LocCompressionStrategy.THRESHOLD`:
+    ```python
+    from pydantic import BaseModel, ConfigDict, ValidationError
+    from pydantic.errors import LocCompressionConfig, LocCompressionStrategy, format_validation_error
+
+    class DeepModel(BaseModel):
+        data: list[list[list[list[int]]]]
+
+        model_config = ConfigDict(
+            loc_compression_config=LocCompressionConfig.compressed(
+                strategy=LocCompressionStrategy.THRESHOLD,
+                threshold=4,
+                keep_start=2,
+                keep_end=1,
+            )
+        )
+
+    try:
+        DeepModel(data=[[[['not_an_int']]]])
+    except ValidationError as e:
+        # Original str(e) shows full path
+        print(str(e))
+        #> 1 validation error for DeepModel
+        #> data.0.0.0.0
+        #>   Input should be a valid integer [...]
+
+        # Use format_validation_error with the model's config for compressed display
+        config = DeepModel.model_config.get('loc_compression_config')
+        if config:
+            print(format_validation_error(e, config))
+            #> 1 validation error for DeepModel
+            #> data.0.[...].0
+            #>   Input should be a valid integer [...]
+    ```
+
+    Example with `LocCompressionStrategy.COLLAPSE_PATTERNS`:
+    ```python
+    from pydantic.errors import LocCompressionConfig, LocCompressionStrategy
+
+    config = LocCompressionConfig(
+        strategy=LocCompressionStrategy.COLLAPSE_PATTERNS,
+        threshold=4,
+    )
+    # For loc: ('items', 0, 'items', 1, 'items', 2, 'value')
+    # Formatted as: 'items[×3].value'
     ```
     """
 

@@ -29,11 +29,10 @@ from ._internal import (
     _mock_val_ser,
     _namespace_utils,
     _repr,
-    _type_adapter_cache,
     _typing_extra,
     _utils,
 )
-from ._internal._type_adapter_cache import TypeAdapterCache, get_global_cache
+from .type_adapter_cache import PrecompileFailure, TypeAdapterCache, get_global_cache
 from .config import ConfigDict, ExtraValues
 from .errors import PydanticUndefinedAnnotation
 from .json_schema import (
@@ -875,7 +874,8 @@ class TypeAdapter(Generic[T]):
         cache: TypeAdapterCache | None = None,
         _use_global_cache: bool = False,
         _parent_depth: int = 2,
-    ) -> TypeAdapterCache:
+        raise_errors: bool = False,
+    ) -> tuple[int, list[PrecompileFailure], TypeAdapterCache]:
         """Precompile multiple types and store them in a cache.
 
         This is designed for library authors to pre-warm the cache during
@@ -892,16 +892,25 @@ class TypeAdapter(Generic[T]):
                 are provided, `cache` takes precedence.
             _parent_depth: Depth at which to search for the parent frame
                 for resolving forward references. Defaults to 2.
+            raise_errors: If True, raises a PrecompileError if any type
+                fails to precompile. If False (default), collects failures
+                in the returned list.
 
         Returns:
-            The cache instance containing the precompiled types.
+            A tuple of (success_count, failures, cache).
+            - success_count: Number of types successfully precompiled.
+            - failures: List of PrecompileFailure objects for failed types.
+            - cache: The cache instance containing the precompiled types.
+
+        Raises:
+            PrecompileError: If raise_errors=True and any type fails to precompile.
 
         Example:
             ```python
             from pydantic import TypeAdapter, TypeAdapterCache
 
             # Create a cache and precompile types during startup
-            cache = TypeAdapter.precompile([
+            success, failures, cache = TypeAdapter.precompile([
                 (list[int], None),
                 (dict[str, int], None),
                 (list[dict[str, int]], {'strict': True}),
@@ -932,8 +941,12 @@ class TypeAdapter(Generic[T]):
             else:
                 cache = TypeAdapterCache()
 
-        cache.precompile(types, _parent_depth=_parent_depth + 1)
-        return cache
+        success, failures = cache.precompile(
+            types,
+            _parent_depth=_parent_depth + 1,
+            raise_errors=raise_errors,
+        )
+        return success, failures, cache
 
     @staticmethod
     def clear_cache(

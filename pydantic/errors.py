@@ -18,9 +18,6 @@ from pydantic._internal._error_format import (
     format_loc,
     format_loc_item,
     format_validation_error,
-    get_default_config,
-    loc_compression,
-    set_default_config,
 )
 
 from ._migration import getattr_migration
@@ -43,9 +40,6 @@ __all__ = (
     'format_error',
     'format_errors',
     'format_validation_error',
-    'get_default_config',
-    'set_default_config',
-    'loc_compression',
 )
 
 # We use this URL to allow for future flexibility about how we host the docs, while allowing for Pydantic

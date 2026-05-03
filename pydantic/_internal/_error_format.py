@@ -2,15 +2,16 @@
 
 This module provides utilities for formatting validation error locations
 with optional path compression for deeply nested structures.
+
+Note: This module does NOT modify the behavior of `str(ValidationError)`.
+Use the provided formatting functions explicitly when you need compressed output.
 """
 
 from __future__ import annotations as _annotations
 
-from collections.abc import Generator, Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Union, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Union, cast
 
 from typing_extensions import TypeAlias
 
@@ -22,7 +23,14 @@ Loc: TypeAlias = tuple[LocItem, ...]
 
 
 class LocCompressionStrategy(str, Enum):
-    """Strategy for compressing long error locations."""
+    """Strategy for compressing long error locations.
+
+    Attributes:
+        NONE: No compression, show full path (default).
+        THRESHOLD: Compress paths longer than threshold by keeping start/end items.
+        COLLAPSE_INDICES: Collapse consecutive integer indices.
+        COLLAPSE_PATTERNS: Collapse repeating key-index patterns.
+    """
 
     NONE = 'none'
     THRESHOLD = 'threshold'
@@ -34,24 +42,43 @@ class LocCompressionStrategy(str, Enum):
 class LocCompressionConfig:
     """Configuration for error location compression.
 
+    By default, no compression is applied (`strategy=NONE`).
+
     Attributes:
         strategy: The compression strategy to use.
         threshold: Minimum length of location before compression is applied.
         keep_start: Number of items to keep at the start when compressing.
         keep_end: Number of items to keep at the end when compressing.
         collapse_placeholder: Placeholder string for collapsed items.
+
+    Example:
+        ```python
+        from pydantic.errors import LocCompressionConfig, LocCompressionStrategy
+
+        # Default: no compression
+        config = LocCompressionConfig()
+
+        # Enable threshold-based compression
+        config = LocCompressionConfig(
+            strategy=LocCompressionStrategy.THRESHOLD,
+            threshold=6,
+            keep_start=3,
+            keep_end=2,
+        )
+
+        # Or use the convenience classmethod
+        config = LocCompressionConfig.compressed(
+            strategy=LocCompressionStrategy.COLLAPSE_PATTERNS,
+            threshold=4,
+        )
+        ```
     """
 
-    strategy: LocCompressionStrategy = LocCompressionStrategy.THRESHOLD
+    strategy: LocCompressionStrategy = LocCompressionStrategy.NONE
     threshold: int = 6
     keep_start: int = 3
     keep_end: int = 2
     collapse_placeholder: str = '[...]'
-
-    @classmethod
-    def default(cls) -> 'LocCompressionConfig':
-        """Get the default compression configuration (no compression)."""
-        return cls(strategy=LocCompressionStrategy.NONE)
 
     @classmethod
     def compressed(
@@ -61,16 +88,27 @@ class LocCompressionConfig:
         keep_start: int = 3,
         keep_end: int = 2,
     ) -> 'LocCompressionConfig':
-        """Get a compression configuration with compression enabled.
+        """Create a compression configuration with compression enabled.
+
+        This is a convenience method for creating a config that enables
+        location path compression.
 
         Args:
             strategy: The compression strategy to use.
             threshold: Minimum length before compression is applied.
-            keep_start: Number of items to keep at the start.
-            keep_end: Number of items to keep at the end.
+            keep_start: Number of items to keep at the start (for THRESHOLD).
+            keep_end: Number of items to keep at the end (for THRESHOLD).
 
         Returns:
-            A configured LocCompressionConfig instance.
+            A configured LocCompressionConfig instance with compression enabled.
+
+        Example:
+            ```python
+            config = LocCompressionConfig.compressed(
+                strategy=LocCompressionStrategy.COLLAPSE_PATTERNS,
+                threshold=4,
+            )
+            ```
         """
         return cls(
             strategy=strategy,
@@ -78,68 +116,6 @@ class LocCompressionConfig:
             keep_start=keep_start,
             keep_end=keep_end,
         )
-
-
-_default_config: LocCompressionConfig = LocCompressionConfig.default()
-
-
-def get_default_config() -> LocCompressionConfig:
-    """Get the current default compression configuration."""
-    return _default_config
-
-
-def set_default_config(config: LocCompressionConfig) -> None:
-    """Set the default compression configuration globally.
-
-    Args:
-        config: The compression configuration to use as default.
-    """
-    global _default_config
-    _default_config = config
-
-
-@contextmanager
-def loc_compression(
-    strategy: LocCompressionStrategy = LocCompressionStrategy.THRESHOLD,
-    threshold: int = 6,
-    keep_start: int = 3,
-    keep_end: int = 2,
-) -> Generator[None, None, None]:
-    """Context manager to temporarily enable location compression.
-
-    Args:
-        strategy: The compression strategy to use.
-        threshold: Minimum length before compression is applied.
-        keep_start: Number of items to keep at the start.
-        keep_end: Number of items to keep at the end.
-
-    Example:
-        ```python
-        from pydantic import BaseModel, ValidationError
-        from pydantic._internal._error_format import loc_compression
-
-        class DeepModel(BaseModel):
-            data: list[list[list[list[int]]]]
-
-        with loc_compression(threshold=4):
-            try:
-                DeepModel(data=[[[['not_an_int']]]])
-            except ValidationError as e:
-                print(e)  # Shows compressed location
-        ```
-    """
-    global _default_config
-    old_config = _default_config
-    _default_config = LocCompressionConfig(
-        strategy=strategy,
-        threshold=threshold,
-        keep_start=keep_start,
-        keep_end=keep_end,
-    )
-    try:
-        yield
-    finally:
-        _default_config = old_config
 
 
 def format_loc_item(item: LocItem) -> str:
@@ -155,6 +131,13 @@ def format_loc_item(item: LocItem) -> str:
 
     Returns:
         The formatted string representation.
+
+    Example:
+        ```python
+        format_loc_item('field')  # 'field'
+        format_loc_item('field.name')  # '`field.name`'
+        format_loc_item(0)  # '0'
+        ```
     """
     if isinstance(item, str):
         if '.' in item:
@@ -165,18 +148,7 @@ def format_loc_item(item: LocItem) -> str:
 
 
 def _compress_threshold(loc: Loc, config: LocCompressionConfig) -> list[str]:
-    """Compress a location using threshold strategy.
-
-    When the location length exceeds the threshold, keep items at the start
-    and end, and replace the middle with a placeholder.
-
-    Args:
-        loc: The location tuple to compress.
-        config: The compression configuration.
-
-    Returns:
-        A list of formatted strings including placeholders.
-    """
+    """Compress a location using threshold strategy."""
     if len(loc) <= config.threshold:
         return [format_loc_item(item) for item in loc]
 
@@ -194,17 +166,7 @@ def _compress_threshold(loc: Loc, config: LocCompressionConfig) -> list[str]:
 
 
 def _compress_indices(loc: Loc, config: LocCompressionConfig) -> list[str]:
-    """Compress a location by collapsing consecutive integer indices.
-
-    For example: ('data', 0, 1, 2, 3, 'value') -> ['data', '[×4]', 'value']
-
-    Args:
-        loc: The location tuple to compress.
-        config: The compression configuration.
-
-    Returns:
-        A list of formatted strings with collapsed indices.
-    """
+    """Compress a location by collapsing consecutive integer indices."""
     if len(loc) <= config.threshold:
         return [format_loc_item(item) for item in loc]
 
@@ -233,19 +195,7 @@ def _compress_indices(loc: Loc, config: LocCompressionConfig) -> list[str]:
 
 
 def _compress_patterns(loc: Loc, config: LocCompressionConfig) -> list[str]:
-    """Compress a location by identifying repeating patterns.
-
-    This handles two types of patterns:
-    1. Exact repeating patterns: ['a', 'b', 'a', 'b'] -> ['(a.b)[×2]']
-    2. Key-index patterns: ['items', 0, 'items', 1, 'items', 2] -> ['items[×3]']
-
-    Args:
-        loc: The location tuple to compress.
-        config: The compression configuration.
-
-    Returns:
-        A list of formatted strings with collapsed patterns.
-    """
+    """Compress a location by identifying repeating patterns."""
     if len(loc) <= config.threshold:
         return [format_loc_item(item) for item in loc]
 
@@ -303,22 +253,28 @@ def _compress_patterns(loc: Loc, config: LocCompressionConfig) -> list[str]:
 
 def compress_loc(
     loc: Loc,
-    config: LocCompressionConfig | None = None,
+    config: LocCompressionConfig,
 ) -> list[str]:
     """Compress a location tuple using the configured strategy.
 
     Args:
         loc: The location tuple (from ErrorDetails['loc']).
-        config: Optional compression configuration. If not provided,
-                uses the global default configuration.
+        config: The compression configuration to use.
 
     Returns:
         A list of formatted strings, potentially including placeholders
         for compressed sections.
-    """
-    if config is None:
-        config = get_default_config()
 
+    Example:
+        ```python
+        from pydantic.errors import LocCompressionConfig, LocCompressionStrategy, compress_loc
+
+        loc = ('level0', 'level1', 'level2', 'level3', 'level4', 'level5', 'level6')
+        config = LocCompressionConfig.compressed(threshold=4)
+        compress_loc(loc, config)
+        # ['level0', 'level1', '[...]', 'level5', 'level6']
+        ```
+    """
     if config.strategy == LocCompressionStrategy.NONE:
         return [format_loc_item(item) for item in loc]
     elif config.strategy == LocCompressionStrategy.THRESHOLD:
@@ -340,7 +296,8 @@ def format_loc(
 
     Args:
         loc: The location tuple (from ErrorDetails['loc']).
-        config: Optional compression configuration.
+        config: Optional compression configuration. If not provided,
+                no compression is applied.
         separator: Separator to use between location items.
 
     Returns:
@@ -348,10 +305,24 @@ def format_loc(
 
     Example:
         ```python
+        from pydantic.errors import format_loc
+
         loc = ('data', 0, 'items', 1, 'value')
         format_loc(loc)  # 'data.0.items.1.value'
         ```
+
+    With compression:
+        ```python
+        from pydantic.errors import LocCompressionConfig, format_loc
+
+        loc = tuple(f'level{i}' for i in range(10))
+        config = LocCompressionConfig.compressed(threshold=6)
+        format_loc(loc, config)  # 'level0.level1.level2.[...].level8.level9'
+        ```
     """
+    if config is None:
+        config = LocCompressionConfig()
+
     compressed = compress_loc(loc, config)
     return separator.join(compressed)
 
@@ -359,10 +330,13 @@ def format_loc(
 class FormattedErrorDetails(NamedTuple):
     """Formatted error details with compressed location.
 
+    This named tuple contains both the machine-readable original error details
+    and a human-readable formatted location string.
+
     Attributes:
         type: The error type (machine-readable).
-        loc: The original location tuple (machine-readable).
-        loc_formatted: The formatted location string (human-readable).
+        loc: The original location tuple (machine-readable, can be used for error analysis).
+        loc_formatted: The formatted location string (human-readable, may be compressed).
         msg: The error message.
         input: The input value (if included).
         ctx: The error context (if included).
@@ -391,7 +365,27 @@ def format_error(
     Returns:
         A FormattedErrorDetails named tuple with both machine-readable
         and human-readable fields.
+
+    Example:
+        ```python
+        from pydantic import BaseModel, ValidationError
+        from pydantic.errors import format_error, LocCompressionConfig
+
+        class Model(BaseModel):
+            data: list[list[int]]
+
+        try:
+            Model(data=[['not_an_int']])
+        except ValidationError as e:
+            for err in e.errors():
+                formatted = format_error(err)
+                print(f'Original loc: {formatted.loc}')  # Machine-readable
+                print(f'Formatted: {formatted.loc_formatted}')  # Human-readable
+        ```
     """
+    if config is None:
+        config = LocCompressionConfig()
+
     loc = cast(Loc, error.get('loc', ()))
     loc_formatted = format_loc(loc, config)
 
@@ -419,9 +413,13 @@ def format_validation_error(
     This function provides similar output to `str(error)` but with
     optional location path compression for deeply nested structures.
 
+    Note: This function does NOT modify the original ValidationError.
+    The `str(error)` behavior remains unchanged.
+
     Args:
         error: The ValidationError to format.
-        config: Optional compression configuration.
+        config: Optional compression configuration. If not provided,
+                no compression is applied (same as `str(error)`).
         include_url: Whether to include documentation URLs.
         include_context: Whether to include error context.
         include_input: Whether to include input values.
@@ -432,7 +430,7 @@ def format_validation_error(
     Example:
         ```python
         from pydantic import BaseModel, ValidationError
-        from pydantic._internal._error_format import format_validation_error, LocCompressionConfig
+        from pydantic.errors import format_validation_error, LocCompressionConfig
 
         class DeepModel(BaseModel):
             data: list[list[list[list[int]]]]
@@ -440,10 +438,17 @@ def format_validation_error(
         try:
             DeepModel(data=[[[['not_an_int']]]])
         except ValidationError as e:
+            # Default: same as str(e)
+            print(str(e))
+            print('---')
+            # With compression
             config = LocCompressionConfig.compressed(threshold=4)
             print(format_validation_error(e, config))
         ```
     """
+    if config is None:
+        config = LocCompressionConfig()
+
     errors = error.errors(
         include_url=include_url,
         include_context=include_context,
@@ -495,5 +500,21 @@ def format_errors(
 
     Returns:
         A list of FormattedErrorDetails named tuples.
+
+    Example:
+        ```python
+        from pydantic import BaseModel, ValidationError
+        from pydantic.errors import format_errors, LocCompressionConfig
+
+        try:
+            # ... validation that fails
+        except ValidationError as e:
+            formatted_list = format_errors(e.errors(), LocCompressionConfig.compressed())
+            for formatted in formatted_list:
+                print(formatted.loc_formatted, formatted.msg)
+        ```
     """
+    if config is None:
+        config = LocCompressionConfig()
+
     return [format_error(err, config) for err in errors]
